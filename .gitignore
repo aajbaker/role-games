@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Environment
+.env
+.venv
+venv/
+env/
+
+# Data exports (generated, not source)
+data/
+
+# R
+.Rhistory
+.RData
