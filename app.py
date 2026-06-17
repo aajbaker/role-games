@@ -107,6 +107,8 @@ with st.sidebar:
         key="speed",
     )
     run_button = st.button("▶  Run Simulation", type="primary", use_container_width=True)
+    if st.button("↺  Reset defaults", use_container_width=True):
+        st.components.v1.html("<script>window.location.reload()</script>", height=0)
 
 DELAY = {"Slow": 0.25, "Medium": 0.08, "Fast": 0.01}[speed]
 
