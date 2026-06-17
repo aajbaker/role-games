@@ -51,9 +51,6 @@ for _k, _v in PARAM_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-def _reset_params() -> None:
-    for _k, _v in PARAM_DEFAULTS.items():
-        st.session_state[_k] = _v
 
 st.caption("Show plots")
 toggle_cols = st.columns(len(ALL_NAMES))
@@ -110,7 +107,6 @@ with st.sidebar:
         key="speed",
     )
     run_button = st.button("▶  Run Simulation", type="primary", use_container_width=True)
-    st.button("↺  Reset defaults", use_container_width=True, on_click=_reset_params)
 
 DELAY = {"Slow": 0.25, "Medium": 0.08, "Fast": 0.01}[speed]
 
