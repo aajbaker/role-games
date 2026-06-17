@@ -187,6 +187,13 @@ class FictitiousPlay(DecisionModel):
                     self._counts[tag] = {"stag": 1, "hare": 1}
                 self._counts[tag][action] += 1
 
+        # Tag-based only: also count own action toward own tag's history
+        if self.condition == Condition.TAG_BASED and self.own_tag is not None:
+            own_action = observation["own_action"]
+            if self.own_tag not in self._counts:
+                self._counts[self.own_tag] = {"stag": 1, "hare": 1}
+            self._counts[self.own_tag][own_action] += 1
+
     def complexity(self) -> float:
         """Normalized entropy averaged across distinct belief distributions."""
         if self.condition == Condition.ANONYMOUS:

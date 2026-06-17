@@ -145,7 +145,9 @@ def run_simulation(
                         "action": action_map[other.agent_id],
                     }
                     for other in agents if other.agent_id != agent.agent_id
-                ]
+                ],
+                "own_action": action_map[agent.agent_id],
+                "own_tag": agent.tag,
             }
             agent.update(observation)
 
