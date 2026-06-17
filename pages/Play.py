@@ -2,6 +2,9 @@ import sys
 import random
 sys.path.insert(0, ".")
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -16,30 +19,50 @@ CONDITION_MAP = {
     "Tag-based":  Condition.TAG_BASED,
 }
 
-AVATAR_POOL  = ["🦊", "🐺", "🐻", "🦁", "🐯", "🐮", "🐸", "🐼"]
-HUMAN_AVATAR = "🧑"
-ACTION_EMOJI = {"stag": "🦌", "hare": "🐇"}
-TAG_COLOR    = {"red": "#e57373", "blue": "#64b5f6"}
+# Colors for identity / anonymous conditions (by player index 0..4)
+PLAYER_COLORS = ["#4878CF", "#6ACC65", "#D65F5F", "#e5a917", "#9b59b6"]
+# Colors for tag-based condition (by tag name)
+TAG_COLORS    = {"red": "#e57373", "blue": "#64b5f6"}
+
+ACTION_EMOJI  = {"stag": "🦌", "hare": "🐇"}
+
+# ─── Helpers that read game state ────────────────────────────────────────────
+
+def _circle_color(agent) -> str:
+    g = st.session_state.g
+    if g["condition"] == Condition.TAG_BASED:
+        return TAG_COLORS.get(agent.tag, "#aaa")
+    return PLAYER_COLORS[g["player_idx"][agent.agent_id] % len(PLAYER_COLORS)]
+
+
+def _player_label(agent, *, for_table=False) -> str:
+    """Display label for an agent.
+    Identity  → You / Player 1 / Player 2 …
+    Tag/Anon  → You / Other Player (game) | You / Player 1 / Player 2 (table)
+    """
+    g     = st.session_state.g
+    is_me = agent.agent_id == g["human_id"]
+    idx   = g["player_idx"][agent.agent_id]
+    if is_me:
+        return "You"
+    if for_table or g["condition"] == Condition.IDENTITY:
+        return f"Player {idx}"
+    return "Other Player"
 
 # ─── Game initialisation ─────────────────────────────────────────────────────
 
 def _init_game() -> None:
-    cond_key     = st.session_state.play_condition
-    condition    = CONDITION_MAP[cond_key]
-    n_players    = int(st.session_state.play_n_players)
-    n_rounds     = int(st.session_state.play_n_rounds)
-    tau          = float(st.session_state.play_tau)
-    discount     = float(st.session_state.play_discount)
-    replacement  = float(st.session_state.play_replacement)
+    cond_key    = st.session_state.play_condition
+    condition   = CONDITION_MAP[cond_key]
+    n_players   = int(st.session_state.play_n_players)
+    n_rounds    = int(st.session_state.play_n_rounds)
+    tau         = float(st.session_state.play_tau)
+    discount    = float(st.session_state.play_discount)
+    replacement = float(st.session_state.play_replacement)
 
     rng    = random.Random()
     agents = _make_agents(condition, tau, n_players, rng, discount=discount)
-
     human_id = agents[0].agent_id
-    pool     = AVATAR_POOL.copy()
-    avatars  = {human_id: HUMAN_AVATAR}
-    for a in agents[1:]:
-        avatars[a.agent_id] = pool.pop(0)
 
     st.session_state.g = {
         "condition":   condition,
@@ -49,11 +72,12 @@ def _init_game() -> None:
         "replacement": replacement,
         "agents":      agents,
         "human_id":    human_id,
-        "avatars":     avatars,
+        # stable per-player index (0 = human, 1..N-1 = simulated)
+        "player_idx":  {a.agent_id: i for i, a in enumerate(agents)},
         "rng":         rng,
-        "phase":       "choosing",   # choosing | revealing | done
+        "phase":       "choosing",
         "round":       1,
-        "total":       0.0,
+        "total":       0.0,      # cumulative group score
         "history":     [],
         "last":        None,
     }
@@ -68,122 +92,109 @@ def _play_round(human_action: str) -> None:
         a.agent_id: (human_action if a.agent_id == g["human_id"] else a.decide())
         for a in agents
     }
-
     actions    = list(action_map.values())
     stag_count = actions.count("stag")
     total      = _group_total(actions)
-    per_player = total / g["n_players"]
 
     g["last"] = {
         "round":       g["round"],
         "action_map":  action_map,
         "stag_count":  stag_count,
         "group_total": total,
-        "payoff":      per_player,
     }
-    g["total"]  += per_player
+    g["total"]  += total
     g["history"].append(g["last"])
     g["phase"]   = "revealing"
 
-    # Update simulated agents' beliefs (human's action is visible to them)
     for agent in agents:
         if agent.agent_id == g["human_id"]:
             continue
-        observation = {
+        agent.update({
             "teammates": [
                 {"agent_id": o.agent_id, "tag": o.tag, "action": action_map[o.agent_id]}
                 for o in agents if o.agent_id != agent.agent_id
             ],
             "own_action": action_map[agent.agent_id],
             "own_tag":    agent.tag,
-        }
-        agent.update(observation)
+        })
 
 
 def _next_round() -> None:
     g = st.session_state.g
-
     if g["replacement"] > 0 and g["rng"].random() < g["replacement"]:
         sims = [a for a in g["agents"] if a.agent_id != g["human_id"]]
         if sims:
             g["rng"].choice(sims).reset()
-
     g["round"] += 1
     g["phase"]  = "done" if g["round"] > g["n_rounds"] else "choosing"
 
-# ─── HTML helpers ────────────────────────────────────────────────────────────
+# ─── Card HTML ───────────────────────────────────────────────────────────────
 
-def _card(agent, *, action=None, show_id=True, show_tag=True) -> str:
-    g      = st.session_state.g
-    avatar = g["avatars"][agent.agent_id]
-    is_me  = agent.agent_id == g["human_id"]
-    border = "#4878CF" if is_me else "#ddd"
+def _card(agent, *, action: str | None = None, show_action: bool = True) -> str:
+    is_me  = agent.agent_id == st.session_state.g["human_id"]
+    color  = _circle_color(agent)
+    label  = _player_label(agent)
+    border = "2px solid #333" if is_me else "2px solid #ddd"
     bg     = "#f0f4ff" if is_me else "#f8f8f8"
-    label  = "You" if is_me else (f"Agent {agent.agent_id}" if show_id else "·")
 
-    tag_html = ""
-    if show_tag and agent.tag:
-        c = TAG_COLOR.get(agent.tag, "#aaa")
-        tag_html = (
-            f'<div style="margin:3px 0 0;">'
-            f'<span style="background:{c};color:#fff;border-radius:4px;'
-            f'padding:1px 7px;font-size:0.72em;">{agent.tag}</span></div>'
-        )
+    # White inner ring on the circle marks "You"
+    ring = f"box-shadow:0 0 0 3px #fff, 0 0 0 6px {color};" if is_me else ""
+    circle = (
+        f'<div style="width:52px;height:52px;border-radius:50%;'
+        f'background:{color};margin:0 auto;{ring}"></div>'
+    )
 
     action_html = ""
-    if action:
-        action_html = f'<div style="font-size:1.6em;margin-top:4px;">{ACTION_EMOJI[action]}</div>'
+    if show_action and action:
+        action_html = f'<div style="font-size:1.5em;margin-top:5px;">{ACTION_EMOJI[action]}</div>'
 
     return (
         f'<div style="text-align:center;padding:12px 8px;border-radius:10px;'
-        f'background:{bg};border:2px solid {border};">'
-        f'<div style="font-size:2.4em;line-height:1;">{avatar}</div>'
-        f'<div style="font-size:0.78em;color:#555;margin-top:3px;">{label}</div>'
-        f'{tag_html}{action_html}</div>'
+        f'background:{bg};border:{border};">'
+        f'{circle}'
+        f'<div style="font-size:0.78em;color:#555;margin-top:6px;">{label}</div>'
+        f'{action_html}</div>'
     )
 
-# ─── Phase renderers ─────────────────────────────────────────────────────────
+# ─── Shared UI ───────────────────────────────────────────────────────────────
 
 def _header() -> None:
-    g   = st.session_state.g
-    rn  = min(g["round"], g["n_rounds"])
+    g  = st.session_state.g
+    rn = min(g["round"], g["n_rounds"])
     c1, c2 = st.columns([3, 1])
     c1.markdown(f"**Round {rn} / {g['n_rounds']}** &nbsp;·&nbsp; {g['cond_name']}",
                 unsafe_allow_html=True)
-    c2.markdown(f"<div style='text-align:right'><b>{g['total']:.2f} pts</b> total</div>",
-                unsafe_allow_html=True)
+    c2.markdown(
+        f"<div style='text-align:right'><b>{g['total']:.1f} pts</b> group total</div>",
+        unsafe_allow_html=True,
+    )
 
+
+def _show_players(action_map=None, *, show_actions: bool = True) -> None:
+    g      = st.session_state.g
+    agents = g["agents"]
+    human  = next(a for a in agents if a.agent_id == g["human_id"])
+    others = [a for a in agents if a.agent_id != g["human_id"]]
+
+    cols = st.columns(len(agents))
+    for col, agent in zip(cols, [human] + others):
+        action = (action_map or {}).get(agent.agent_id)
+        col.markdown(
+            _card(agent, action=action, show_action=(show_actions and action is not None)),
+            unsafe_allow_html=True,
+        )
+
+# ─── Phase renderers ─────────────────────────────────────────────────────────
 
 def _render_choosing() -> None:
-    g         = st.session_state.g
-    agents    = g["agents"]
-    condition = g["condition"]
-    anon      = condition == Condition.ANONYMOUS
-
     _header()
     st.divider()
-
-    if anon:
-        n_others = g["n_players"] - 1
-        st.markdown(
-            f"You are playing anonymously with "
-            f"**{n_others} other player{'s' if n_others > 1 else ''}**."
-        )
-    else:
-        human  = next(a for a in agents if a.agent_id == g["human_id"])
-        others = [a for a in agents if a.agent_id != g["human_id"]]
-        show_id  = condition == Condition.IDENTITY
-        show_tag = condition == Condition.TAG_BASED
-
-        cols = st.columns(len(agents))
-        for col, agent in zip(cols, [human] + others):
-            col.markdown(_card(agent, show_id=show_id, show_tag=show_tag),
-                         unsafe_allow_html=True)
-
+    _show_players()
     st.divider()
+
     st.markdown("**What do you choose?**")
     c1, c2, *_ = st.columns([1, 1, 3])
-    if c1.button("🦌  Hunt Stag", use_container_width=True, type="primary"):
+    if c1.button("🦌  Hunt Stag", use_container_width=True):
         _play_round("stag")
         st.rerun()
     if c2.button("🐇  Hunt Hare", use_container_width=True):
@@ -195,43 +206,29 @@ def _render_revealing() -> None:
     g          = st.session_state.g
     result     = g["last"]
     action_map = result["action_map"]
-    agents     = g["agents"]
-    condition  = g["condition"]
-    anon       = condition == Condition.ANONYMOUS
+    anon       = g["condition"] == Condition.ANONYMOUS
 
     _header()
     st.divider()
 
     if anon:
-        sc = result["stag_count"]
-        hc = g["n_players"] - sc
+        # Show circles but no per-player action labels; aggregate below
+        _show_players(action_map=action_map, show_actions=False)
+        sc           = result["stag_count"]
+        hc           = g["n_players"] - sc
         human_action = action_map[g["human_id"]]
         st.markdown(
-            f"**Outcome:** &nbsp; 🦌 ×{sc} &nbsp; 🐇 ×{hc}",
+            f"**Outcome:** &nbsp; 🦌 ×{sc} &nbsp; 🐇 ×{hc} &nbsp;&nbsp;·&nbsp;&nbsp;"
+            f"Your choice: **{ACTION_EMOJI[human_action]} {human_action.title()}**",
             unsafe_allow_html=True,
         )
-        st.markdown(
-            f"Your choice: **{ACTION_EMOJI[human_action]} {human_action.title()}**"
-        )
     else:
-        human  = next(a for a in agents if a.agent_id == g["human_id"])
-        others = [a for a in agents if a.agent_id != g["human_id"]]
-        show_id  = condition == Condition.IDENTITY
-        show_tag = condition == Condition.TAG_BASED
-
-        cols = st.columns(len(agents))
-        for col, agent in zip(cols, [human] + others):
-            col.markdown(
-                _card(agent, action=action_map[agent.agent_id],
-                      show_id=show_id, show_tag=show_tag),
-                unsafe_allow_html=True,
-            )
+        _show_players(action_map=action_map, show_actions=True)
 
     st.divider()
-
     mc1, mc2 = st.columns(2)
-    mc1.metric("This round", f"+{result['payoff']:.2f} pts")
-    mc2.metric("Total", f"{g['total']:.2f} pts")
+    mc1.metric("Group score this round", f"{result['group_total']:.1f} pts")
+    mc2.metric("Group total so far",     f"{g['total']:.1f} pts")
 
     label = "▶  Next Round" if g["round"] < g["n_rounds"] else "▶  See Final Results"
     if st.button(label, type="primary"):
@@ -240,33 +237,60 @@ def _render_revealing() -> None:
 
 
 def _render_done() -> None:
-    g = st.session_state.g
+    g        = st.session_state.g
+    n        = g["n_players"]
+    nr       = g["n_rounds"]
+    optimal  = n + 2        # 2 stag + rest hare
+    minimum  = n - 1        # 1 lone stag, rest hare
 
-    st.markdown("### Game over")
-    avg = g["total"] / g["n_rounds"]
-    st.markdown(
-        f"You scored **{g['total']:.2f} pts** over {g['n_rounds']} rounds "
-        f"({avg:.2f} pts / round on average)."
-    )
+    st.markdown("### Results")
 
-    # Cumulative payoff chart
-    running, rows = 0.0, []
-    for r in g["history"]:
-        running += r["payoff"]
-        rows.append({"Round": r["round"], "Cumulative payoff": running})
-    st.line_chart(pd.DataFrame(rows).set_index("Round"))
+    # Summary totals
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Group total",    f"{g['total']:.0f} pts")
+    c2.metric("Optimal total",  f"{optimal * nr} pts")
+    c3.metric("Minimum total",  f"{minimum * nr} pts")
 
-    # Round-by-round table
-    table = []
-    for r in g["history"]:
-        act = r["action_map"][g["human_id"]]
-        table.append({
-            "Round":        r["round"],
-            "Your choice":  f"{ACTION_EMOJI[act]} {act.title()}",
-            "Stag players": r["stag_count"],
-            "Payoff":       f"{r['payoff']:.2f} pts",
-        })
-    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    # Per-round payoff chart
+    history = g["history"]
+    rounds  = [r["round"]       for r in history]
+    payoffs = [r["group_total"] for r in history]
+
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.plot(rounds, payoffs, marker="o", color="#4878CF", linewidth=2, label="Group score")
+    ax.axhline(optimal, color="#4CAF50", linestyle="--", linewidth=1.2,
+               label=f"Optimal ({optimal})")
+    ax.axhline(minimum, color="#9E9E9E", linestyle=":",  linewidth=1.2,
+               label=f"Minimum ({minimum})")
+    ax.set_xlabel("Round")
+    ax.set_ylabel("Group score")
+    ax.set_ylim(max(0, minimum - 0.5), optimal + 1.5)
+    ax.set_xticks(rounds)
+    ax.legend(fontsize=8)
+    ax.set_facecolor("white")
+    fig.patch.set_facecolor("white")
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+    # Per-round table — all players' choices
+    agents  = g["agents"]
+    human   = next(a for a in agents if a.agent_id == g["human_id"])
+    others  = [a for a in agents if a.agent_id != g["human_id"]]
+    ordered = [human] + others
+
+    rows = []
+    for r in history:
+        am  = r["action_map"]
+        row = {"Round": r["round"]}
+        for agent in ordered:
+            col_name     = _player_label(agent, for_table=True)
+            act          = am[agent.agent_id]
+            row[col_name] = f"{ACTION_EMOJI[act]} {act.title()}"
+        row["Group score"] = f"{r['group_total']:.0f}"
+        rows.append(row)
+
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     if st.button("▶  Play Again", type="primary"):
         del st.session_state.g
@@ -277,14 +301,12 @@ def _render_done() -> None:
 def _sidebar() -> None:
     with st.sidebar:
         st.header("Game settings")
-
         st.selectbox("Condition", list(CONDITION_MAP), key="play_condition",
                      help="Information available to all players about each other.")
         st.number_input("Players (including you)",
                         min_value=3, max_value=5, value=3, step=1,
                         key="play_n_players")
         st.slider("Rounds", 5, 50, 20, step=5, key="play_n_rounds")
-
         with st.expander("Agent parameters"):
             st.slider("Temperature (τ)", 0.0, 0.2, 0.1, step=0.01,
                       format="%.2f", key="play_tau",
@@ -295,7 +317,6 @@ def _sidebar() -> None:
             st.slider("Replacement rate", 0.0, 0.5, 0.0, step=0.05,
                       format="%.2f", key="play_replacement",
                       help="Probability each round that one agent's memory resets.")
-
         st.divider()
         if st.button("▶  New Game", type="primary", use_container_width=True):
             _init_game()
@@ -304,7 +325,7 @@ def _sidebar() -> None:
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Play — Role Games",
+    page_title="Play",
     layout="wide",
     initial_sidebar_state="collapsed",
 )

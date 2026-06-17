@@ -20,7 +20,7 @@ plt.rcParams.update({
     "savefig.facecolor": "white",
 })
 
-st.set_page_config(page_title="Role Games", layout="wide")
+st.set_page_config(page_title="Simulate", layout="wide")
 
 
 st.markdown("### Role Games Simulator")
