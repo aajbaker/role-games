@@ -23,6 +23,8 @@ CONDITION_MAP = {
 PLAYER_COLORS = ["#4878CF", "#6ACC65", "#D65F5F", "#e5a917", "#9b59b6"]
 # Colors for tag-based condition (by tag name)
 TAG_COLORS    = {"red": "#e57373", "blue": "#64b5f6"}
+# Uniform grey for all circles in the anonymous condition
+ANON_COLOR    = "#9E9E9E"
 
 ACTION_EMOJI  = {"stag": "🦌", "hare": "🐇"}
 
@@ -32,6 +34,8 @@ def _circle_color(agent) -> str:
     g = st.session_state.g
     if g["condition"] == Condition.TAG_BASED:
         return TAG_COLORS.get(agent.tag, "#aaa")
+    if g["condition"] == Condition.ANONYMOUS:
+        return ANON_COLOR
     return PLAYER_COLORS[g["player_idx"][agent.agent_id] % len(PLAYER_COLORS)]
 
 
@@ -134,14 +138,13 @@ def _card(agent, *, action: str | None = None, show_action: bool = True) -> str:
     is_me  = agent.agent_id == st.session_state.g["human_id"]
     color  = _circle_color(agent)
     label  = _player_label(agent)
-    border = "2px solid #333" if is_me else "2px solid #ddd"
-    bg     = "#f0f4ff" if is_me else "#f8f8f8"
 
-    # White inner ring on the circle marks "You"
-    ring = f"box-shadow:0 0 0 3px #fff, 0 0 0 6px {color};" if is_me else ""
+    card_extra   = "box-shadow:0 2px 8px rgba(0,0,0,0.28);" if is_me else ""
+    label_weight = "font-weight:600;" if is_me else ""
+
     circle = (
         f'<div style="width:52px;height:52px;border-radius:50%;'
-        f'background:{color};margin:0 auto;{ring}"></div>'
+        f'background:{color};margin:0 auto;"></div>'
     )
 
     action_html = ""
@@ -150,8 +153,59 @@ def _card(agent, *, action: str | None = None, show_action: bool = True) -> str:
 
     return (
         f'<div style="text-align:center;padding:12px 8px;border-radius:10px;'
-        f'background:{bg};border:{border};">'
+        f'background:#f8f8f8;border:2px solid #ddd;{card_extra}">'
         f'{circle}'
+        f'<div style="font-size:0.78em;color:#555;margin-top:6px;{label_weight}">{label}</div>'
+        f'{action_html}</div>'
+    )
+
+def _tag_group_card(tag: str, group: list, *, action_map=None, show_actions: bool = True) -> str:
+    """Card representing all non-human agents sharing the same tag."""
+    g         = st.session_state.g
+    color     = TAG_COLORS.get(tag, "#aaa")
+    count     = len(group)
+    human_tag = next(a for a in g["agents"] if a.agent_id == g["human_id"]).tag
+
+    label = f"{count} {tag.title()} Player" + ("s" if count > 1 else "")
+
+    action_html = ""
+    if show_actions and action_map is not None:
+        emojis = "".join(ACTION_EMOJI[action_map[a.agent_id]] for a in group)
+        action_html = (
+            f'<div style="font-size:1.5em;margin-top:5px;letter-spacing:2px;">'
+            f'{emojis}</div>'
+        )
+
+    return (
+        f'<div style="text-align:center;padding:12px 8px;border-radius:10px;'
+        f'background:#f8f8f8;border:2px solid #ddd;">'
+        f'<div style="width:52px;height:52px;border-radius:50%;'
+        f'background:{color};margin:0 auto;"></div>'
+        f'<div style="font-size:0.78em;color:#555;margin-top:6px;">{label}</div>'
+        f'{action_html}</div>'
+    )
+
+
+def _anon_group_card(others: list, *, action_map=None, show_actions: bool = True) -> str:
+    """Card representing all non-human agents in the anonymous condition."""
+    count = len(others)
+    label = f"{count} Other Player" + ("s" if count > 1 else "")
+
+    action_html = ""
+    if show_actions and action_map is not None:
+        stag_n = sum(1 for a in others if action_map[a.agent_id] == "stag")
+        hare_n = count - stag_n
+        emojis = ACTION_EMOJI["stag"] * stag_n + ACTION_EMOJI["hare"] * hare_n
+        action_html = (
+            f'<div style="font-size:1.5em;margin-top:5px;letter-spacing:2px;">'
+            f'{emojis}</div>'
+        )
+
+    return (
+        f'<div style="text-align:center;padding:12px 8px;border-radius:10px;'
+        f'background:#f8f8f8;border:2px solid #ddd;">'
+        f'<div style="width:52px;height:52px;border-radius:50%;'
+        f'background:{ANON_COLOR};margin:0 auto;"></div>'
         f'<div style="font-size:0.78em;color:#555;margin-top:6px;">{label}</div>'
         f'{action_html}</div>'
     )
@@ -165,7 +219,7 @@ def _header() -> None:
     c1.markdown(f"**Round {rn} / {g['n_rounds']}** &nbsp;·&nbsp; {g['cond_name']}",
                 unsafe_allow_html=True)
     c2.markdown(
-        f"<div style='text-align:right'><b>{g['total']:.1f} pts</b> group total</div>",
+        f"<div style='text-align:right'><b>{g['total']:.0f} pts</b> group total</div>",
         unsafe_allow_html=True,
     )
 
@@ -176,13 +230,51 @@ def _show_players(action_map=None, *, show_actions: bool = True) -> None:
     human  = next(a for a in agents if a.agent_id == g["human_id"])
     others = [a for a in agents if a.agent_id != g["human_id"]]
 
-    cols = st.columns(len(agents))
-    for col, agent in zip(cols, [human] + others):
-        action = (action_map or {}).get(agent.agent_id)
-        col.markdown(
-            _card(agent, action=action, show_action=(show_actions and action is not None)),
+    if g["condition"] == Condition.TAG_BASED:
+        # One card per tag group
+        tag_groups: dict[str, list] = {}
+        for a in others:
+            tag_groups.setdefault(a.tag, []).append(a)
+
+        ordered_tags = sorted(tag_groups.keys())
+        cols = st.columns(1 + len(ordered_tags))
+
+        human_action = (action_map or {}).get(human.agent_id)
+        cols[0].markdown(
+            _card(human, action=human_action,
+                  show_action=(show_actions and human_action is not None)),
             unsafe_allow_html=True,
         )
+        for col, tag in zip(cols[1:], ordered_tags):
+            col.markdown(
+                _tag_group_card(tag, tag_groups[tag],
+                                action_map=action_map, show_actions=show_actions),
+                unsafe_allow_html=True,
+            )
+
+    elif g["condition"] == Condition.ANONYMOUS:
+        # Two cards: You + one group card for all other players
+        cols = st.columns(2)
+        human_action = (action_map or {}).get(human.agent_id)
+        cols[0].markdown(
+            _card(human, action=human_action,
+                  show_action=(show_actions and human_action is not None)),
+            unsafe_allow_html=True,
+        )
+        cols[1].markdown(
+            _anon_group_card(others, action_map=action_map, show_actions=show_actions),
+            unsafe_allow_html=True,
+        )
+
+    else:
+        cols = st.columns(len(agents))
+        for col, agent in zip(cols, [human] + others):
+            action = (action_map or {}).get(agent.agent_id)
+            col.markdown(
+                _card(agent, action=action,
+                      show_action=(show_actions and action is not None)),
+                unsafe_allow_html=True,
+            )
 
 # ─── Phase renderers ─────────────────────────────────────────────────────────
 
@@ -192,7 +284,13 @@ def _render_choosing() -> None:
     _show_players()
     st.divider()
 
+    n       = st.session_state.g["n_players"]
+    optimal = n + 2
+    minimum = n - 1
+
     st.markdown("**What do you choose?**")
+    st.caption("🦌 Stag needs ≥ 2 players (+4 pts) · 🐇 Hare always pays (+1 pt)")
+    st.caption(f"Minimum score: {minimum} pts  \nMaximum score: {optimal} pts")
     c1, c2, *_ = st.columns([1, 1, 3])
     if c1.button("🦌  Hunt Stag", use_container_width=True):
         _play_round("stag")
@@ -206,29 +304,15 @@ def _render_revealing() -> None:
     g          = st.session_state.g
     result     = g["last"]
     action_map = result["action_map"]
-    anon       = g["condition"] == Condition.ANONYMOUS
 
     _header()
     st.divider()
-
-    if anon:
-        # Show circles but no per-player action labels; aggregate below
-        _show_players(action_map=action_map, show_actions=False)
-        sc           = result["stag_count"]
-        hc           = g["n_players"] - sc
-        human_action = action_map[g["human_id"]]
-        st.markdown(
-            f"**Outcome:** &nbsp; 🦌 ×{sc} &nbsp; 🐇 ×{hc} &nbsp;&nbsp;·&nbsp;&nbsp;"
-            f"Your choice: **{ACTION_EMOJI[human_action]} {human_action.title()}**",
-            unsafe_allow_html=True,
-        )
-    else:
-        _show_players(action_map=action_map, show_actions=True)
+    _show_players(action_map=action_map, show_actions=True)
 
     st.divider()
     mc1, mc2 = st.columns(2)
-    mc1.metric("Group score this round", f"{result['group_total']:.1f} pts")
-    mc2.metric("Group total so far",     f"{g['total']:.1f} pts")
+    mc1.metric("Group score this round", f"{result['group_total']:.0f} pts")
+    mc2.metric("Group total so far",     f"{g['total']:.0f} pts")
 
     label = "▶  Next Round" if g["round"] < g["n_rounds"] else "▶  See Final Results"
     if st.button(label, type="primary"):
@@ -306,7 +390,7 @@ def _sidebar() -> None:
         st.number_input("Players (including you)",
                         min_value=3, max_value=5, value=3, step=1,
                         key="play_n_players")
-        st.slider("Rounds", 5, 50, 20, step=5, key="play_n_rounds")
+        st.slider("Rounds", 5, 20, 10, step=5, key="play_n_rounds")
         with st.expander("Agent parameters"):
             st.slider("Temperature (τ)", 0.0, 0.2, 0.1, step=0.01,
                       format="%.2f", key="play_tau",
@@ -324,18 +408,107 @@ def _sidebar() -> None:
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
-st.set_page_config(
-    page_title="Play",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 _sidebar()
 
 if "g" not in st.session_state:
-    st.markdown("## Role Games — Play")
-    st.caption("Make decisions alongside simulated agents in a modified stag hunt.")
-    st.info("Open the **←** sidebar to configure and start a game.")
+    st.markdown("## Role Games")
+    st.markdown(
+        "A coordination game. Each round you and a group of simulated players secretly choose "
+        "an action, which combine for different payoffs. Your goal is to maximize your group's points."
+    )
+    st.divider()
+
+    col_game, col_play = st.columns([3, 2], gap="large")
+
+    with col_game:
+        st.markdown("**Actions**")
+        st.markdown(
+            '<div style="display:flex;gap:10px;margin-bottom:14px;">'
+            '<div style="flex:1;padding:10px 14px;border-radius:8px;'
+            'background:#f0f4ff;border:1px solid #c5cae9;">'
+            '<span style="font-size:1.3em;">🦌</span>&nbsp; <b>Hunt Stag</b><br>'
+            '<span style="color:#555;font-size:0.88em;">'
+            'Worth 4 points, but only 1 per round.<br>'
+            'Risky: needs <b>≥ 2 players</b> to pay off.'
+            '</span></div>'
+            '<div style="flex:1;padding:10px 14px;border-radius:8px;'
+            'background:#f0fff4;border:1px solid #c8e6c9;">'
+            '<span style="font-size:1.3em;">🐇</span>&nbsp; <b>Hunt Hare</b><br>'
+            '<span style="color:#555;font-size:0.88em;">'
+            'Worth 1 point, but plenty available.<br>'
+            'Safe: always pays off.'
+            '</span></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("**Group score examples** *(3 players)*")
+        st.markdown(
+            '<table style="font-size:0.88em;width:100%;border-collapse:collapse;">'
+            '<tr style="background:#efefef;">'
+            '  <th style="padding:5px 10px;text-align:center;">🦌 Stag</th>'
+            '  <th style="padding:5px 10px;text-align:center;">🐇 Hare</th>'
+            '  <th style="padding:5px 10px;text-align:left;">Group score</th>'
+            '</tr>'
+            '<tr>'
+            '  <td style="padding:5px 10px;text-align:center;">0</td>'
+            '  <td style="padding:5px 10px;text-align:center;">3</td>'
+            '  <td style="padding:5px 10px;">3 pts</td>'
+            '</tr>'
+            '<tr style="background:#fff3e0;">'
+            '  <td style="padding:5px 10px;text-align:center;">1</td>'
+            '  <td style="padding:5px 10px;text-align:center;">2</td>'
+            '  <td style="padding:5px 10px;">2 pts &nbsp;<span style="color:#e65100;font-size:0.85em;">▼ worst outcome</span></td>'
+            '</tr>'
+            '<tr style="background:#e8f5e9;">'
+            '  <td style="padding:5px 10px;text-align:center;"><b>2</b></td>'
+            '  <td style="padding:5px 10px;text-align:center;"><b>1</b></td>'
+            '  <td style="padding:5px 10px;"><b>5 pts</b> &nbsp;<span style="color:#2e7d32;font-size:0.85em;">★ optimal</span></td>'
+            '</tr>'
+            '<tr>'
+            '  <td style="padding:5px 10px;text-align:center;">3</td>'
+            '  <td style="padding:5px 10px;text-align:center;">0</td>'
+            '  <td style="padding:5px 10px;">4 pts</td>'
+            '</tr>'
+            '</table>',
+            unsafe_allow_html=True,
+        )
+
+    with col_play:
+        st.markdown(
+            '<div style="padding:14px 16px;border-radius:8px;background:#f8f8f8;border:1px solid #ddd;">'
+            '<b>How to play</b>'
+            '<ol style="margin:8px 0 0 0;padding-left:18px;color:#333;font-size:0.92em;line-height:1.8em;">'
+            '<li>Open the <b>← sidebar</b> to choose a condition, players, and rounds</li>'
+            '<li>Click <b>▶ New Game</b> to start</li>'
+            '<li>Each round: choose <b>Stag</b> or <b>Hare</b></li>'
+            '<li>See what the group chose and your score</li>'
+            '<li>After all rounds: review the full history and chart</li>'
+            '</ol>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+    st.markdown("**Informational conditions** — what you know about other players each round")
+
+    cc1, cc2, cc3 = st.columns(3)
+    for col, icon, name, desc in [
+        (cc1, "🔒", "Anonymous",
+         "You see only aggregate counts — how many chose stag and hare — not who."),
+        (cc2, "🪪", "Identity",
+         "You see each individual player's choice every round, building a full history per person."),
+        (cc3, "🏷️", "Tag-based",
+         "Players have colored tags (red / blue). You see choices grouped by tag, not by individual."),
+    ]:
+        col.markdown(
+            f'<div style="padding:10px 14px;border-radius:8px;'
+            f'background:#f8f8f8;border:1px solid #ddd;min-height:90px;">'
+            f'<b>{icon}&nbsp;{name}</b><br>'
+            f'<span style="color:#444;font-size:0.88em;">{desc}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
 else:
     phase = st.session_state.g["phase"]
     if phase == "choosing":
