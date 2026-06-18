@@ -82,8 +82,9 @@ def _init_game() -> None:
         "phase":       "choosing",
         "round":       1,
         "total":       0.0,      # cumulative group score
-        "history":     [],
-        "last":        None,
+        "history":          [],
+        "last":             None,
+        "last_replacement": None,
     }
 
 # ─── Round logic ─────────────────────────────────────────────────────────────
@@ -105,6 +106,7 @@ def _play_round(human_action: str) -> None:
         "action_map":  action_map,
         "stag_count":  stag_count,
         "group_total": total,
+        "replacement": g.get("last_replacement"),
     }
     g["total"]  += total
     g["history"].append(g["last"])
@@ -125,10 +127,16 @@ def _play_round(human_action: str) -> None:
 
 def _next_round() -> None:
     g = st.session_state.g
+    g["last_replacement"] = None
     if g["replacement"] > 0 and g["rng"].random() < g["replacement"]:
         sims = [a for a in g["agents"] if a.agent_id != g["human_id"]]
         if sims:
-            g["rng"].choice(sims).reset()
+            replaced = g["rng"].choice(sims)
+            g["last_replacement"] = {
+                "player_idx": g["player_idx"][replaced.agent_id],
+                "tag":        replaced.tag,
+            }
+            replaced.reset()
     g["round"] += 1
     g["phase"]  = "done" if g["round"] > g["n_rounds"] else "choosing"
 
@@ -141,10 +149,11 @@ def _card(agent, *, action: str | None = None, show_action: bool = True) -> str:
 
     card_extra   = "box-shadow:0 2px 8px rgba(0,0,0,0.28);" if is_me else ""
     label_weight = "font-weight:600;" if is_me else ""
+    ring = f"box-shadow:0 0 0 3px #fff, 0 0 0 5px {color};" if is_me else ""
 
     circle = (
         f'<div style="width:52px;height:52px;border-radius:50%;'
-        f'background:{color};margin:0 auto;"></div>'
+        f'background:{color};margin:0 auto;{ring}"></div>'
     )
 
     action_html = ""
@@ -159,55 +168,55 @@ def _card(agent, *, action: str | None = None, show_action: bool = True) -> str:
         f'{action_html}</div>'
     )
 
-def _tag_group_card(tag: str, group: list, *, action_map=None, show_actions: bool = True) -> str:
-    """Card representing all non-human agents sharing the same tag."""
-    g         = st.session_state.g
-    color     = TAG_COLORS.get(tag, "#aaa")
-    count     = len(group)
-    human_tag = next(a for a in g["agents"] if a.agent_id == g["human_id"]).tag
 
-    label = f"{count} {tag.title()} Player" + ("s" if count > 1 else "")
+def _mini_circle(agent, *, action: str | None = None, show_action: bool = False) -> str:
+    """Single circle unit for use inside a group card."""
+    is_me  = agent.agent_id == st.session_state.g["human_id"]
+    color  = _circle_color(agent)
+    label  = _player_label(agent)
+    label_weight = "font-weight:600;" if is_me else ""
+    ring = f"box-shadow:0 0 0 3px #fff, 0 0 0 5px {color};" if is_me else ""
+
+    circle = (
+        f'<div style="width:44px;height:44px;border-radius:50%;'
+        f'background:{color};margin:0 auto;{ring}"></div>'
+    )
 
     action_html = ""
-    if show_actions and action_map is not None:
-        emojis = "".join(ACTION_EMOJI[action_map[a.agent_id]] for a in group)
-        action_html = (
-            f'<div style="font-size:1.5em;margin-top:5px;letter-spacing:2px;">'
-            f'{emojis}</div>'
-        )
+    if show_action and action:
+        action_html = f'<div style="font-size:1.2em;margin-top:4px;">{ACTION_EMOJI[action]}</div>'
 
     return (
-        f'<div style="text-align:center;padding:12px 8px;border-radius:10px;'
-        f'background:#f8f8f8;border:2px solid #ddd;">'
-        f'<div style="width:52px;height:52px;border-radius:50%;'
-        f'background:{color};margin:0 auto;"></div>'
-        f'<div style="font-size:0.78em;color:#555;margin-top:6px;">{label}</div>'
+        f'<div style="text-align:center;min-width:58px;padding:4px 6px;">'
+        f'{circle}'
+        f'<div style="font-size:0.70em;color:#555;margin-top:5px;{label_weight}">{label}</div>'
         f'{action_html}</div>'
     )
 
 
-def _anon_group_card(others: list, *, action_map=None, show_actions: bool = True) -> str:
-    """Card representing all non-human agents in the anonymous condition."""
-    count = len(others)
-    label = f"{count} Other Player" + ("s" if count > 1 else "")
+def _group_card(title: str, agents_ordered: list, *, action_map=None, show_actions: bool = False) -> str:
+    """Card containing multiple mini-circles in a row, with aggregate actions below."""
+    circles_html = "".join(_mini_circle(a) for a in agents_ordered)
 
     action_html = ""
     if show_actions and action_map is not None:
-        stag_n = sum(1 for a in others if action_map[a.agent_id] == "stag")
-        hare_n = count - stag_n
+        stag_n = sum(1 for a in agents_ordered if action_map.get(a.agent_id) == "stag")
+        hare_n = sum(1 for a in agents_ordered if action_map.get(a.agent_id) == "hare")
         emojis = ACTION_EMOJI["stag"] * stag_n + ACTION_EMOJI["hare"] * hare_n
         action_html = (
-            f'<div style="font-size:1.5em;margin-top:5px;letter-spacing:2px;">'
-            f'{emojis}</div>'
+            f'<div style="font-size:1.3em;margin-top:10px;letter-spacing:2px;">{emojis}</div>'
+            f'<div style="font-size:0.68em;color:#aaa;margin-top:6px;">order does not correspond to players</div>'
         )
 
     return (
-        f'<div style="text-align:center;padding:12px 8px;border-radius:10px;'
+        f'<div style="text-align:center;padding:12px 10px;border-radius:10px;'
         f'background:#f8f8f8;border:2px solid #ddd;">'
-        f'<div style="width:52px;height:52px;border-radius:50%;'
-        f'background:{ANON_COLOR};margin:0 auto;"></div>'
-        f'<div style="font-size:0.78em;color:#555;margin-top:6px;">{label}</div>'
-        f'{action_html}</div>'
+        f'<div style="font-size:0.78em;font-weight:600;color:#444;margin-bottom:10px;">{title}</div>'
+        f'<div style="display:flex;flex-direction:row;justify-content:center;gap:40px;flex-wrap:wrap;">'
+        f'{circles_html}'
+        f'</div>'
+        f'{action_html}'
+        f'</div>'
     )
 
 # ─── Shared UI ───────────────────────────────────────────────────────────────
@@ -230,43 +239,8 @@ def _show_players(action_map=None, *, show_actions: bool = True) -> None:
     human  = next(a for a in agents if a.agent_id == g["human_id"])
     others = [a for a in agents if a.agent_id != g["human_id"]]
 
-    if g["condition"] == Condition.TAG_BASED:
-        # One card per tag group
-        tag_groups: dict[str, list] = {}
-        for a in others:
-            tag_groups.setdefault(a.tag, []).append(a)
-
-        ordered_tags = sorted(tag_groups.keys())
-        cols = st.columns(1 + len(ordered_tags))
-
-        human_action = (action_map or {}).get(human.agent_id)
-        cols[0].markdown(
-            _card(human, action=human_action,
-                  show_action=(show_actions and human_action is not None)),
-            unsafe_allow_html=True,
-        )
-        for col, tag in zip(cols[1:], ordered_tags):
-            col.markdown(
-                _tag_group_card(tag, tag_groups[tag],
-                                action_map=action_map, show_actions=show_actions),
-                unsafe_allow_html=True,
-            )
-
-    elif g["condition"] == Condition.ANONYMOUS:
-        # Two cards: You + one group card for all other players
-        cols = st.columns(2)
-        human_action = (action_map or {}).get(human.agent_id)
-        cols[0].markdown(
-            _card(human, action=human_action,
-                  show_action=(show_actions and human_action is not None)),
-            unsafe_allow_html=True,
-        )
-        cols[1].markdown(
-            _anon_group_card(others, action_map=action_map, show_actions=show_actions),
-            unsafe_allow_html=True,
-        )
-
-    else:
+    if g["condition"] == Condition.IDENTITY:
+        # N separate individual cards, human first
         cols = st.columns(len(agents))
         for col, agent in zip(cols, [human] + others):
             action = (action_map or {}).get(agent.agent_id)
@@ -276,12 +250,49 @@ def _show_players(action_map=None, *, show_actions: bool = True) -> None:
                 unsafe_allow_html=True,
             )
 
+    elif g["condition"] == Condition.ANONYMOUS:
+        # All N circles in one "Players" card; actions shown as aggregate (stags first)
+        pool = [human] + others
+        st.markdown(
+            _group_card("Players", pool, action_map=action_map, show_actions=show_actions),
+            unsafe_allow_html=True,
+        )
+
+    else:  # TAG_BASED
+        # One card per tag; human in their own tag's card; actions shown as aggregate per tag
+        red_group  = sorted([a for a in agents if a.tag == "red"],  key=lambda a: a.agent_id != g["human_id"])
+        blue_group = sorted([a for a in agents if a.tag == "blue"], key=lambda a: a.agent_id != g["human_id"])
+        col_widths = [max(len(red_group), 1), max(len(blue_group), 1)]
+        cols = st.columns(col_widths)
+        for col, (tag, group) in zip(cols, [("Red", red_group), ("Blue", blue_group)]):
+            title = f"{tag} Players" if len(group) != 1 else f"{tag} Player"
+            col.markdown(
+                _group_card(title, group, action_map=action_map, show_actions=show_actions),
+                unsafe_allow_html=True,
+            )
+
 # ─── Phase renderers ─────────────────────────────────────────────────────────
 
 def _render_choosing() -> None:
+    g = st.session_state.g
     _header()
     st.divider()
     _show_players()
+
+    rep = g.get("last_replacement")
+    if rep:
+        if g["condition"] == Condition.ANONYMOUS:
+            msg = "One of the players has been replaced!"
+        elif g["condition"] == Condition.IDENTITY:
+            msg = f"Player {rep['player_idx']} has been replaced!"
+        else:
+            msg = f"One of the {rep['tag'].title()} players has been replaced!"
+        st.markdown(
+            f'<div style="margin-top:10px;margin-bottom:-10px;padding:8px 14px;'
+            f'border-radius:6px;background:#e8f4fd;border:1px solid #b3d4f0;'
+            f'color:#1a5276;font-size:0.9em;">ℹ️ {msg}</div>',
+            unsafe_allow_html=True,
+        )
     st.divider()
 
     n       = st.session_state.g["n_players"]
@@ -363,15 +374,25 @@ def _render_done() -> None:
     others  = [a for a in agents if a.agent_id != g["human_id"]]
     ordered = [human] + others
 
+    show_replacement = g["replacement"] > 0
+
+    def _col_name(agent) -> str:
+        label = _player_label(agent, for_table=True)
+        if g["condition"] == Condition.TAG_BASED:
+            return f"{label} ({agent.tag.title()})"
+        return label
+
     rows = []
     for r in history:
         am  = r["action_map"]
         row = {"Round": r["round"]}
         for agent in ordered:
-            col_name     = _player_label(agent, for_table=True)
-            act          = am[agent.agent_id]
-            row[col_name] = f"{ACTION_EMOJI[act]} {act.title()}"
+            act              = am[agent.agent_id]
+            row[_col_name(agent)] = f"{ACTION_EMOJI[act]} {act.title()}"
         row["Group score"] = f"{r['group_total']:.0f}"
+        if show_replacement:
+            rep = r.get("replacement")
+            row["Replaced"] = f"Player {rep['player_idx']}" if rep else None
         rows.append(row)
 
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
@@ -390,6 +411,9 @@ def _sidebar() -> None:
         st.number_input("Players (including you)",
                         min_value=3, max_value=5, value=3, step=1,
                         key="play_n_players")
+        st.slider("Replacement rate", 0.0, 0.5, 0.0, step=0.05,
+                  format="%.2f", key="play_replacement",
+                  help="Probability each round that one agent's memory resets.")
         st.slider("Rounds", 5, 20, 10, step=5, key="play_n_rounds")
         with st.expander("Agent parameters"):
             st.slider("Temperature (τ)", 0.0, 0.2, 0.1, step=0.01,
@@ -398,9 +422,6 @@ def _sidebar() -> None:
             st.slider("Discount factor (δ)", 0.5, 1.0, 1.0, step=0.05,
                       format="%.2f", key="play_discount",
                       help="How much agents downweight older observations.")
-            st.slider("Replacement rate", 0.0, 0.5, 0.0, step=0.05,
-                      format="%.2f", key="play_replacement",
-                      help="Probability each round that one agent's memory resets.")
         st.divider()
         if st.button("▶  New Game", type="primary", use_container_width=True):
             _init_game()
@@ -423,7 +444,7 @@ if "g" not in st.session_state:
     with col_game:
         st.markdown("**Actions**")
         st.markdown(
-            '<div style="display:flex;gap:10px;margin-bottom:14px;">'
+            '<div style="display:flex;gap:40px;margin-bottom:14px;">'
             '<div style="flex:1;padding:10px 14px;border-radius:8px;'
             'background:#f0f4ff;border:1px solid #c5cae9;">'
             '<span style="font-size:1.3em;">🦌</span>&nbsp; <b>Hunt Stag</b><br>'

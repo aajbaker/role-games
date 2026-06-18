@@ -23,6 +23,30 @@ plt.rcParams.update({
 st.markdown("### Role Games Simulator")
 st.caption("Modified stag hunt under three informational conditions.")
 
+if "sim_has_run" not in st.session_state:
+    st.markdown(
+        '<div style="padding:14px 18px;border-radius:8px;background:#f8f8f8;border:1px solid #ddd;margin-bottom:4px;">'
+        '<b>How the simulation works</b>'
+        '<p style="color:#444;font-size:0.9em;margin:8px 0 6px 0;">'
+        'Each run simulates <b>N independent groups</b> of agents playing the stag hunt over multiple rounds. '
+        'All three informational conditions run in parallel so you can compare them directly.'
+        '</p>'
+        '<b style="font-size:0.9em;">Agent model — Fictitious Play</b>'
+        '<p style="color:#444;font-size:0.9em;margin:6px 0 6px 0;">'
+        'Agents track how often others have chosen stag in the past and use that to estimate what others will do next round. '
+        'They pick the action with the higher expected payoff, with some randomness controlled by temperature (τ). '
+        'A discount factor (δ) lets agents weight recent rounds more heavily.'
+        '</p>'
+        '<b style="font-size:0.9em;">Informational conditions</b>'
+        '<ul style="color:#444;font-size:0.9em;margin:6px 0 0 0;padding-left:18px;line-height:1.8em;">'
+        '<li><b>Anonymous</b> — agents see only the aggregate count of stag/hare choices each round</li>'
+        '<li><b>Identity</b> — agents track each individual separately, building a belief per person</li>'
+        '<li><b>Tag-based</b> — agents track choices by tag color (red / blue), one belief per tag</li>'
+        '</ul>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
 PLOT_REGISTRY = [
     ("Payoff by round",  plot_group_total),
     ("Total payoff",     plot_total_payoff),
@@ -113,6 +137,7 @@ DELAY = {"Slow": 0.25, "Medium": 0.08, "Fast": 0.01}[speed]
 # Run + animate
 # ------------------------------------------------------------------
 if run_button:
+    st.session_state["sim_has_run"] = True
 
     if not selected_plots and not show_outcomes:
         st.warning("Select at least one plot to display.")

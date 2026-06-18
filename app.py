@@ -3,8 +3,8 @@ import streamlit as st
 st.set_page_config(page_title="Role Games", layout="wide")
 
 pg = st.navigation([
-    st.Page("Simulate.py", title="Simulate"),
     st.Page("Play.py", title="Play"),
+    st.Page("Simulate.py", title="Simulate"),
 ])
 
 # Clear any in-progress game when navigating to Play from another page
