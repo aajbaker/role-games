@@ -23,8 +23,9 @@ plt.rcParams.update({
 st.markdown("### Role Games Simulator")
 st.caption("Modified stag hunt under three informational conditions.")
 
+_desc = st.empty()
 if "sim_has_run" not in st.session_state:
-    st.markdown(
+    _desc.markdown(
         '<div style="padding:14px 18px;border-radius:8px;background:#f8f8f8;border:1px solid #ddd;margin-bottom:4px;">'
         '<b>How the simulation works</b>'
         '<p style="color:#444;font-size:0.9em;margin:8px 0 6px 0;">'
@@ -151,6 +152,7 @@ DELAY = {"Slow": 0.25, "Medium": 0.08, "Fast": 0.01}[speed]
 # ------------------------------------------------------------------
 if run_button:
     st.session_state["sim_has_run"] = True
+    _desc.empty()
 
     if not selected_plots and not show_outcomes:
         st.warning("Select at least one plot to display.")
