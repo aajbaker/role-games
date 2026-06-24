@@ -63,9 +63,12 @@ def _init_game() -> None:
     tau         = float(st.session_state.play_tau)
     discount    = float(st.session_state.play_discount)
     replacement = float(st.session_state.play_replacement)
+    model_label = st.session_state.get("play_model_type", "Fictitious Play")
+    model_type  = "fictitious_play" if model_label == "Fictitious Play" else "bayesian_tom"
 
     rng    = random.Random()
-    agents = _make_agents(condition, tau, n_players, rng, discount=discount)
+    agents = _make_agents(condition, tau, n_players, rng,
+                          discount=discount, model_type=model_type)
     human_id = agents[0].agent_id
 
     st.session_state.g = {
@@ -416,6 +419,15 @@ def _sidebar() -> None:
                   help="Probability each round that one agent's memory resets.")
         st.slider("Rounds", 5, 20, 10, step=5, key="play_n_rounds")
         with st.expander("Agent parameters"):
+            st.selectbox(
+                "Agent model",
+                ["Fictitious Play", "Bayesian ToM"],
+                key="play_model_type",
+                help=(
+                    "Fictitious Play tracks action frequencies. "
+                    "Bayesian ToM models what other agents believe."
+                ),
+            )
             st.slider("Temperature (τ)", 0.0, 0.2, 0.1, step=0.01,
                       format="%.2f", key="play_tau",
                       help="How deterministically agents follow expected value.")

@@ -3,6 +3,7 @@ import random
 
 from ..agents import DecisionModel
 from ..conditions import Condition
+from ._ev import _ev_stag, _ev_hare
 
 
 # ------------------------------------------------------------------
@@ -20,53 +21,6 @@ _LOG2 = math.log(2)
 
 def _normalized_entropy(p: float) -> float:
     return _binary_entropy(p) / _LOG2
-
-
-# ------------------------------------------------------------------
-# Poisson-Binomial PMF
-# ------------------------------------------------------------------
-
-def _poisson_binomial_pmf(probs: list[float]) -> list[float]:
-    """
-    Compute the exact PMF of the sum of independent Bernoulli(p_i) variables.
-    Returns a list of length len(probs)+1 where result[k] = P(sum == k).
-    Uses dynamic programming; exact for any N.
-    """
-    dp = [0.0] * (len(probs) + 1)
-    dp[0] = 1.0
-    for p in probs:
-        for k in range(len(probs), 0, -1):
-            dp[k] = dp[k] * (1 - p) + dp[k - 1] * p
-        dp[0] *= (1 - p)
-    return dp
-
-
-# ------------------------------------------------------------------
-# Generalised EV (works for any N via Poisson-Binomial)
-# ------------------------------------------------------------------
-
-def _ev_stag(teammate_probs: list[float], n_players: int) -> float:
-    """EV of hunting stag given beliefs about N-1 teammates."""
-    pmf = _poisson_binomial_pmf(teammate_probs)
-    ev = 0.0
-    for k, prob in enumerate(pmf):
-        stag_count = 1 + k          # focal chose stag
-        hare_count = n_players - stag_count
-        group_total = (4.0 if stag_count >= 2 else 0.0) + hare_count
-        ev += prob * group_total / n_players
-    return ev
-
-
-def _ev_hare(teammate_probs: list[float], n_players: int) -> float:
-    """EV of hunting hare given beliefs about N-1 teammates."""
-    pmf = _poisson_binomial_pmf(teammate_probs)
-    ev = 0.0
-    for k, prob in enumerate(pmf):
-        stag_count = k              # focal chose hare
-        hare_count = n_players - stag_count
-        group_total = (4.0 if stag_count >= 2 else 0.0) + hare_count
-        ev += prob * group_total / n_players
-    return ev
 
 
 # ------------------------------------------------------------------

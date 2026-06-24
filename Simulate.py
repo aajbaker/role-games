@@ -67,6 +67,7 @@ PARAM_DEFAULTS: dict = {
     "n_rounds":         30,
     "n_simulations":    300,
     "speed":            "Medium",
+    "model_type":       "Fictitious Play",
 }
 for _k, _v in PARAM_DEFAULTS.items():
     if _k not in st.session_state:
@@ -90,6 +91,18 @@ st.divider()
 # ------------------------------------------------------------------
 with st.sidebar:
     st.header("Parameters")
+
+    model_type = st.selectbox(
+        "Agent model",
+        ["Fictitious Play", "Bayesian ToM"],
+        key="model_type",
+        help=(
+            "Fictitious Play tracks action frequencies. "
+            "Bayesian ToM models what other agents believe. "
+            "⚠️ BToM with Identity + N=5 is compute-heavy."
+        ),
+    )
+    model_type_key = "fictitious_play" if model_type == "Fictitious Play" else "bayesian_tom"
 
     n_players = st.number_input(
         "Players", min_value=3, max_value=5, step=1,
@@ -153,6 +166,7 @@ if run_button:
             n_players=n_players,
             replacement_rate=replacement_rate,
             discount=discount,
+            model_type=model_type_key,
         )
 
     rounds_df, _ = to_dataframes(rr, sr)

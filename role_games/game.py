@@ -4,7 +4,7 @@ from typing import Any
 
 from .agents import Agent
 from .conditions import Condition
-from .models import FictitiousPlay
+from .models import FictitiousPlay, BayesianToM
 
 
 # ------------------------------------------------------------------
@@ -30,8 +30,12 @@ def _assign_tags(n_players: int, rng: random.Random) -> list[str | None]:
 # ------------------------------------------------------------------
 
 def _make_agents(
-    condition: Condition, tau: float, n_players: int, rng: random.Random,
+    condition: Condition,
+    tau: float,
+    n_players: int,
+    rng: random.Random,
     discount: float = 1.0,
+    model_type: str = "fictitious_play",
 ) -> list[Agent]:
     agent_ids = list(range(n_players))
 
@@ -46,8 +50,12 @@ def _make_agents(
             {"agent_id": agent_ids[j], "tag": tags[j]}
             for j in range(n_players) if j != i
         ]
-        model = FictitiousPlay(condition, tag, tau, n_players, teammates_info,
-                               discount=discount)
+        if model_type == "bayesian_tom":
+            model = BayesianToM(condition, aid, tag, tau, n_players,
+                                teammates_info, discount=discount)
+        else:
+            model = FictitiousPlay(condition, tag, tau, n_players,
+                                   teammates_info, discount=discount)
         agents.append(Agent(aid, tag, model))
 
     return agents
@@ -75,6 +83,7 @@ def run_simulation(
     n_players: int = 3,
     replacement_rate: float = 0.0,
     discount: float = 1.0,
+    model_type: str = "fictitious_play",
     sim_id: int = 0,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -88,7 +97,8 @@ def run_simulation(
                   before the new observation is added (1.0 = standard fictitious play).
     """
     rng = random.Random(seed)
-    agents = _make_agents(condition, tau, n_players, rng, discount=discount)
+    agents = _make_agents(condition, tau, n_players, rng,
+                          discount=discount, model_type=model_type)
 
     records: list[dict[str, Any]] = []
     recent_stag_counts: deque[int] = deque(maxlen=k_convergence)
@@ -130,7 +140,8 @@ def run_simulation(
                     "agent_payoff": per_player,
                     "complexity": comp,
                     "replaced": agent.agent_id in replaced_this_round,
-                    "converged": converged,
+                    "model_type": model_type,
+                    "converged":  converged,
                 }
             )
 
@@ -174,6 +185,7 @@ def run_multiple(
     n_players: int = 3,
     replacement_rate: float = 0.0,
     discount: float = 1.0,
+    model_type: str = "fictitious_play",
     base_seed: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
@@ -193,6 +205,7 @@ def run_multiple(
             n_players=n_players,
             replacement_rate=replacement_rate,
             discount=discount,
+            model_type=model_type,
             sim_id=sim_id,
             seed=seed,
         )
@@ -224,6 +237,7 @@ def run_all_conditions(
     n_players: int = 3,
     replacement_rate: float = 0.0,
     discount: float = 1.0,
+    model_type: str = "fictitious_play",
     base_seed: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run all three conditions and return combined records."""
@@ -240,6 +254,7 @@ def run_all_conditions(
             n_players=n_players,
             replacement_rate=replacement_rate,
             discount=discount,
+            model_type=model_type,
             base_seed=base_seed,
         )
         all_round_records.extend(rr)
