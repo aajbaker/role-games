@@ -398,9 +398,35 @@ def _render_done() -> None:
             row["Replaced"] = f"Player {rep['player_idx']}" if rep else None
         rows.append(row)
 
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    display_df = pd.DataFrame(rows)
+    st.dataframe(display_df, hide_index=True, use_container_width=True)
 
-    if st.button("▶  Play Again", type="primary"):
+    # Full export DataFrame — same rows plus game metadata columns
+    meta = {
+        "condition":       g["cond_name"],
+        "n_players":       n,
+        "n_rounds":        nr,
+        "replacement_rate": g["replacement"],
+        "model_type":      st.session_state.get("play_model_type", "Fictitious Play"),
+        "tau":             st.session_state.get("play_tau", 0.05),
+        "discount":        st.session_state.get("play_discount", 0.90),
+    }
+    export_df = display_df.copy()
+    for col, val in meta.items():
+        export_df[col] = val
+
+    cond_slug = g["cond_name"].lower().replace("-", "").replace(" ", "")
+    filename  = f"rolegames_{cond_slug}_{n}p_{nr}r.csv"
+
+    dl_col, play_col = st.columns([1, 1])
+    dl_col.download_button(
+        "⬇  Download results",
+        data=export_df.to_csv(index=False),
+        file_name=filename,
+        mime="text/csv",
+        use_container_width=True,
+    )
+    if play_col.button("▶  Play Again", type="primary", use_container_width=True):
         del st.session_state.g
         st.rerun()
 
@@ -428,10 +454,10 @@ def _sidebar() -> None:
                     "Bayesian ToM models what other agents believe."
                 ),
             )
-            st.slider("Temperature (τ)", 0.0, 0.2, 0.1, step=0.01,
+            st.slider("Temperature (τ)", 0.0, 0.2, 0.05, step=0.01,
                       format="%.2f", key="play_tau",
                       help="How deterministically agents follow expected value.")
-            st.slider("Discount factor (δ)", 0.5, 1.0, 1.0, step=0.05,
+            st.slider("Discount factor (δ)", 0.5, 1.0, 0.90, step=0.05,
                       format="%.2f", key="play_discount",
                       help="How much agents downweight older observations.")
         st.divider()

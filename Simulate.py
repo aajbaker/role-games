@@ -63,8 +63,8 @@ PLOT_DEFAULTS = {"Payoff by round", "Total payoff"}
 PARAM_DEFAULTS: dict = {
     "n_players":        3,
     "replacement_rate": 0.0,
-    "tau":              0.1,
-    "discount":         1.0,
+    "tau":              0.05,
+    "discount":         0.90,
     "n_rounds":         30,
     "n_simulations":    300,
     "speed":            "Medium",
