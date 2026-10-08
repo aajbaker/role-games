@@ -3,7 +3,7 @@ import random
 
 from ..agents import DecisionModel
 from ..conditions import Condition
-from ._ev import _ev_stag, _ev_hare
+from ._ev import _ev_stag, _ev_hare, _ev_group
 
 
 # ------------------------------------------------------------------
@@ -37,6 +37,15 @@ class FictitiousPlay(DecisionModel):
       Tag-based  — one count per tag label
 
     Works for any number of players via Poisson-Binomial EV.
+
+    decision_rule (Tag-based only; ignored in other conditions):
+      "individual" — choose my action given independent beliefs about each teammate
+      "group"      — assume each tag acts as a block; choose my group's action
+                     given P(other tag hunts stag)
+
+    include_own_action (Tag-based only): if True, my own action also counts toward
+    my tag's belief.  Only applies when a teammate shares my tag; an agent alone in
+    its tag holds no belief about it.
     """
 
     def __init__(
@@ -47,15 +56,26 @@ class FictitiousPlay(DecisionModel):
         n_players: int,
         teammates_info: list[dict],
         discount: float = 1.0,
+        decision_rule: str = "individual",
+        rng: random.Random | None = None,
+        include_own_action: bool = False,
     ):
         self.condition = condition
+        self.include_own_action = include_own_action
+        self._rng = rng if rng is not None else random.Random()
         self.own_tag = own_tag
         self.tau = tau
         self.n_players = n_players
         self.discount = discount
+        self.group_mode = condition == Condition.TAG_BASED and decision_rule == "group"
 
         self._teammate_ids: list[int] = [t["agent_id"] for t in teammates_info]
         self._teammate_tags: list[str | None] = [t["tag"] for t in teammates_info]
+
+        if self.group_mode:
+            self._other_tag = next(t for t in self._teammate_tags if t != own_tag)
+            self._n_own = 1 + self._teammate_tags.count(own_tag)
+            self._n_other = self._teammate_tags.count(self._other_tag)
 
         self._counts: dict[str, dict[str, int]] = {}
         self._init_counts(teammates_info)
@@ -101,13 +121,17 @@ class FictitiousPlay(DecisionModel):
     # ------------------------------------------------------------------
 
     def decide(self) -> str:
-        probs = self._p_teammates()
-        ev_s = _ev_stag(probs, self.n_players)
-        ev_h = _ev_hare(probs, self.n_players)
+        if self.group_mode:
+            q = self._p(self._other_tag)
+            ev_s, ev_h = _ev_group(self._n_own, self._n_other, q, self.n_players)
+        else:
+            probs = self._p_teammates()
+            ev_s = _ev_stag(probs, self.n_players)
+            ev_h = _ev_hare(probs, self.n_players)
         m = max(ev_s, ev_h) / self.tau
         z_s = math.exp(ev_s / self.tau - m)
         z_h = math.exp(ev_h / self.tau - m)
-        return "stag" if random.random() < z_s / (z_s + z_h) else "hare"
+        return "stag" if self._rng.random() < z_s / (z_s + z_h) else "hare"
 
     def _decay_counts(self) -> None:
         """Multiply every count by the discount factor (no-op when discount == 1.0)."""
@@ -142,14 +166,19 @@ class FictitiousPlay(DecisionModel):
                 self._counts[tag][action] += 1
 
         # Tag-based only: also count own action toward own tag's history
-        if self.condition == Condition.TAG_BASED and self.own_tag is not None:
-            own_action = observation["own_action"]
-            if self.own_tag not in self._counts:
-                self._counts[self.own_tag] = {"stag": 1, "hare": 1}
-            self._counts[self.own_tag][own_action] += 1
+        # (own tag has a count only if a teammate shares it)
+        if (self.condition == Condition.TAG_BASED and self.include_own_action
+                and self.own_tag in self._counts):
+            self._counts[self.own_tag][observation["own_action"]] += 1
 
     def complexity(self) -> float:
-        """Normalized entropy averaged across distinct belief distributions."""
+        """
+        Normalized entropy averaged across distinct belief distributions.
+        Group mode counts only the other-tag belief, the only one the decision uses.
+        """
+        if self.group_mode:
+            return _normalized_entropy(self._p(self._other_tag))
+
         if self.condition == Condition.ANONYMOUS:
             return _normalized_entropy(self._p("pool"))
 
@@ -166,3 +195,11 @@ class FictitiousPlay(DecisionModel):
         """Reset all belief counts to uniform prior (pseudocount of 1 each)."""
         for key in self._counts:
             self._counts[key] = {"stag": 1, "hare": 1}
+
+    def teammate_replaced(self, agent_id: int) -> None:
+        """
+        Identity only: forget the replaced teammate.  Anonymous and tag beliefs
+        are pooled across several players, so they are left unchanged.
+        """
+        if self.condition == Condition.IDENTITY:
+            self._counts[str(agent_id)] = {"stag": 1, "hare": 1}

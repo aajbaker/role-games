@@ -65,10 +65,15 @@ def _init_game() -> None:
     replacement = float(st.session_state.play_replacement)
     model_label = st.session_state.get("play_model_type", "Fictitious Play")
     model_type  = "fictitious_play" if model_label == "Fictitious Play" else "bayesian_tom"
+    # Tag-based options are only shown (and only apply) for Tag-based games
+    is_tag      = condition == Condition.TAG_BASED
+    rule_label  = st.session_state.get("play_decision_rule", "Individual") if is_tag else "Individual"
+    include_own = bool(st.session_state.get("play_include_own_action", False)) and is_tag
 
     rng    = random.Random()
     agents = _make_agents(condition, tau, n_players, rng,
-                          discount=discount, model_type=model_type)
+                          discount=discount, model_type=model_type,
+                          decision_rule=rule_label.lower(), include_own_action=include_own)
     human_id = agents[0].agent_id
 
     st.session_state.g = {
@@ -77,6 +82,8 @@ def _init_game() -> None:
         "n_players":   n_players,
         "n_rounds":    n_rounds,
         "replacement": replacement,
+        "decision_rule":      rule_label,
+        "include_own_action": include_own,
         "agents":      agents,
         "human_id":    human_id,
         # stable per-player index (0 = human, 1..N-1 = simulated)
@@ -140,6 +147,9 @@ def _next_round() -> None:
                 "tag":        replaced.tag,
             }
             replaced.reset()
+            for other in g["agents"]:
+                if other is not replaced:
+                    other.teammate_replaced(replaced.agent_id)
     g["round"] += 1
     g["phase"]  = "done" if g["round"] > g["n_rounds"] else "choosing"
 
@@ -408,6 +418,8 @@ def _render_done() -> None:
         "n_rounds":        nr,
         "replacement_rate": g["replacement"],
         "model_type":      st.session_state.get("play_model_type", "Fictitious Play"),
+        "decision_rule":   g["decision_rule"],
+        "include_own_action": g["include_own_action"],
         "tau":             st.session_state.get("play_tau", 0.05),
         "discount":        st.session_state.get("play_discount", 0.90),
     }
@@ -442,7 +454,8 @@ def _sidebar() -> None:
                         key="play_n_players")
         st.slider("Replacement rate", 0.0, 0.5, 0.0, step=0.05,
                   format="%.2f", key="play_replacement",
-                  help="Probability each round that one agent's memory resets.")
+                  help="Probability each round that one simulated player is replaced by a newcomer. "
+                       "In Identity, the other agents also reset their belief about that player.")
         st.slider("Rounds", 5, 20, 10, step=5, key="play_n_rounds")
         with st.expander("Agent parameters"):
             st.selectbox(
@@ -454,6 +467,29 @@ def _sidebar() -> None:
                     "Bayesian ToM models what other agents believe."
                 ),
             )
+            if st.session_state.get("play_condition") == "Tag-based":
+                st.markdown("**Tag-based options**")
+                st.selectbox(
+                    "Decision rule",
+                    ["Individual", "Group"],
+                    key="play_decision_rule",
+                    help=(
+                        "Individual (default): choose my own action, treating each teammate as an "
+                        "independent draw. This is the same rule used in the other conditions. "
+                        "Group: assume each tag acts as a block and choose my group's action given "
+                        "what the other tag will do."
+                    ),
+                )
+                st.checkbox(
+                    "Count own choices toward own tag", value=False,
+                    key="play_include_own_action",
+                    help=(
+                        "Off (default): beliefs come only from teammates' choices, as in the other "
+                        "conditions. On: an agent's own choice also counts toward its belief about "
+                        "its own tag. Applies under the Individual rule only, and only to agents "
+                        "with a teammate in their tag."
+                    ),
+                )
             st.slider("Temperature (τ)", 0.0, 0.2, 0.05, step=0.01,
                       format="%.2f", key="play_tau",
                       help="How deterministically agents follow expected value.")

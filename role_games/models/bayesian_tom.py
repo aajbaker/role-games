@@ -10,6 +10,16 @@ Belief vector θ dimensionality by condition:
   Anonymous  : 1D  (θ ∈ [0,1]  — pool stag rate)
   Tag-based  : 2D  ((θ_red, θ_blue) ∈ [0,1]²)
   Identity   : (n-1)D  per tracked agent  → (n-1)² total dimensions
+
+decision_rule="group" (Tag-based only): every agent, including the ones i
+models, assumes each tag acts as a block and chooses its group's action given
+P(other tag hunts stag).  A tag's choice then depends only on its belief about
+the other tag, so each tag's posterior is 1D (θ = that tag's belief about the
+other tag's stag rate).
+
+include_own_action (Tag-based only): if True, i's own action also updates the
+posterior for i's tag.  i holds a posterior only for tags its teammates have,
+so an agent alone in its tag never models its own tag.
 """
 import math
 import random
@@ -18,7 +28,7 @@ import numpy as np
 
 from ..agents import DecisionModel
 from ..conditions import Condition
-from ._ev import _ev_stag, _ev_hare, _ev_stag_vec, _ev_hare_vec
+from ._ev import _ev_stag, _ev_hare, _ev_stag_vec, _ev_hare_vec, _ev_group
 
 
 class BayesianToM(DecisionModel):
@@ -33,14 +43,21 @@ class BayesianToM(DecisionModel):
         teammates_info: list[dict],   # [{"agent_id": int, "tag": str | None}]
         discount: float = 1.0,
         n_grid: int = 10,
+        decision_rule: str = "individual",
+        rng: random.Random | None = None,
+        include_own_action: bool = False,
     ) -> None:
         self.condition     = condition
+        self.include_own_action = include_own_action
+        self._rng          = rng if rng is not None else random.Random()
         self.own_agent_id  = own_agent_id
         self.own_tag       = own_tag
         self.tau           = tau
         self.n_players     = n_players
         self.discount      = discount
         self.n_grid        = n_grid
+        self.group_mode    = (condition == Condition.TAG_BASED
+                              and decision_rule == "group")
 
         self._theta_vals = np.linspace(
             1 / (2 * n_grid), 1 - 1 / (2 * n_grid), n_grid
@@ -56,6 +73,9 @@ class BayesianToM(DecisionModel):
         self._all_tags: dict[int, str | None] = {own_agent_id: own_tag}
         for t in teammates_info:
             self._all_tags[t["agent_id"]] = t["tag"]
+        self._tag_sizes: dict[str | None, int] = {}
+        for tag in self._all_tags.values():
+            self._tag_sizes[tag] = self._tag_sizes.get(tag, 0) + 1
 
         # Posteriors and their associated P(stag | θ) grids
         self._posteriors:    dict[str, np.ndarray] = {}
@@ -75,10 +95,13 @@ class BayesianToM(DecisionModel):
             self._posteriors["pool"] = self._uniform(1)
 
         elif self.condition == Condition.TAG_BASED:
-            # One 2D posterior per tag: dim-0 = θ_red, dim-1 = θ_blue
-            all_tags = {self.own_tag} | {t["tag"] for t in teammates_info}
-            for tag in sorted(t for t in all_tags if t is not None):
-                self._posteriors[tag] = self._uniform(2)
+            # Individual: one 2D posterior per tag (dim-0 = θ_red, dim-1 = θ_blue)
+            # Group: one 1D posterior per tag (θ about the other tag)
+            # Only tags held by a teammate; an agent alone in its tag doesn't model it
+            d = 1 if self.group_mode else 2
+            teammate_tags = {t["tag"] for t in teammates_info}
+            for tag in sorted(t for t in teammate_tags if t is not None):
+                self._posteriors[tag] = self._uniform(d)
 
         else:  # IDENTITY
             d = len(teammates_info)   # = n_players - 1
@@ -105,6 +128,14 @@ class BayesianToM(DecisionModel):
             ev_s = np.array([_ev_stag([t] * (n - 1), n) for t in tv])
             ev_h = np.array([_ev_hare([t] * (n - 1), n) for t in tv])
             self._p_stag_grids["pool"] = self._softmax_grid(ev_s, ev_h)
+
+        elif self.group_mode:
+            # 1D grid over the key tag's belief about the other tag
+            for key_tag in self._posteriors:
+                other = self._other_tag(key_tag)
+                ev_s, ev_h = _ev_group(self._tag_sizes[key_tag],
+                                       self._tag_sizes[other], tv, n)
+                self._p_stag_grids[key_tag] = self._softmax_grid(ev_s, ev_h)
 
         elif self.condition == Condition.TAG_BASED:
             # 2D grid shared by all agents of the same tag
@@ -134,6 +165,9 @@ class BayesianToM(DecisionModel):
             p_stag_id = self._softmax_grid(ev_s, ev_h)
             for key in self._posteriors:
                 self._p_stag_grids[key] = p_stag_id   # shared reference
+
+    def _other_tag(self, tag: str) -> str:
+        return next(t for t in self._tag_sizes if t != tag)
 
     # ── Bayesian update helpers ───────────────────────────────────────────────
 
@@ -183,7 +217,8 @@ class BayesianToM(DecisionModel):
                     self._update_posterior(tag, action)
 
         # Tag-based only: treat own action as evidence about own-tag agents
-        if self.condition == Condition.TAG_BASED and self.own_tag in self._posteriors:
+        if (self.condition == Condition.TAG_BASED and self.include_own_action
+                and self.own_tag in self._posteriors):
             self._update_posterior(self.own_tag, observation["own_action"])
 
     def _expected_teammate_probs(self) -> list[float]:
@@ -209,21 +244,33 @@ class BayesianToM(DecisionModel):
             return result
 
     def decide(self) -> str:
-        probs = self._expected_teammate_probs()
-        ev_s  = _ev_stag(probs, self.n_players)
-        ev_h  = _ev_hare(probs, self.n_players)
+        if self.group_mode:
+            other = self._other_tag(self.own_tag)
+            q     = float((self._posteriors[other] * self._p_stag_grids[other]).sum())
+            ev_s, ev_h = _ev_group(self._tag_sizes[self.own_tag],
+                                   self._tag_sizes[other], q, self.n_players)
+        else:
+            probs = self._expected_teammate_probs()
+            ev_s  = _ev_stag(probs, self.n_players)
+            ev_h  = _ev_hare(probs, self.n_players)
         m     = max(ev_s, ev_h) / self.tau
         z_s   = math.exp(ev_s / self.tau - m)
         z_h   = math.exp(ev_h / self.tau - m)
-        return "stag" if random.random() < z_s / (z_s + z_h) else "hare"
+        return "stag" if self._rng.random() < z_s / (z_s + z_h) else "hare"
 
     def complexity(self) -> float:
         """
         Normalized entropy of each posterior, averaged across tracked entities.
         Naturally captures dimensionality: identity N=5 normalises by log(20^4).
+        Group mode counts only the other tag's posterior, the only one the
+        decision uses.
         """
+        if self.group_mode:
+            posteriors = [self._posteriors[self._other_tag(self.own_tag)]]
+        else:
+            posteriors = list(self._posteriors.values())
         entropies = []
-        for posterior in self._posteriors.values():
+        for posterior in posteriors:
             p     = posterior.flatten()
             p     = p[p > 0]
             h     = float(-np.sum(p * np.log(p)))
@@ -235,3 +282,14 @@ class BayesianToM(DecisionModel):
         for key in self._posteriors:
             d = len(self._posteriors[key].shape)
             self._posteriors[key] = self._uniform(d)
+
+    def teammate_replaced(self, agent_id: int) -> None:
+        """
+        Identity only: reset the posterior about the replaced teammate.
+        Posteriors about other teammates are left alone: they are symmetric
+        across their axes (a teammate's choice depends only on the mix of its
+        beliefs), so they hold no belief tied to the replaced agent.
+        """
+        key = str(agent_id)
+        if self.condition == Condition.IDENTITY and key in self._posteriors:
+            self._posteriors[key] = self._uniform(self._posteriors[key].ndim)

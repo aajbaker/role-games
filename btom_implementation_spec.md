@@ -2,6 +2,8 @@
 
 This document is a self-contained spec for implementing a Bayesian Theory of Mind (BToM) agent model alongside the existing Fictitious Play (FP) model. It includes all necessary context about the existing codebase, the full mathematical design, implementation instructions, and integration notes.
 
+> **Status (October 2026):** Implemented in `role_games/models/bayesian_tom.py`. Sections 1–3, 5 and 6 describe the current implementation. Section 4 lists where each piece lives and how the build differs from the original plan. Section 8 is a change log.
+
 ---
 
 ## 1. Codebase Overview
@@ -14,13 +16,15 @@ role-games-model/
 ├── Simulate.py                     # Simulation page
 ├── Play.py                         # Human play page
 ├── role_games/
-│   ├── __init__.py                 # Exports run_all_conditions, to_dataframes
+│   ├── __init__.py                 # Exports Condition, run_simulation, run_multiple, run_all_conditions, to_dataframes, export_csv
 │   ├── conditions.py               # Condition enum
 │   ├── agents.py                   # Agent class + DecisionModel interface
 │   ├── game.py                     # _make_agents(), run_simulation(), etc.
 │   └── models/
-│       ├── __init__.py             # Exports FictitiousPlay
-│       └── fictitious_play.py      # Existing FP model
+│       ├── __init__.py             # Exports FictitiousPlay, BayesianToM
+│       ├── _ev.py                  # Shared EV helpers (scalar, vectorized, group rule)
+│       ├── fictitious_play.py      # FP model
+│       └── bayesian_tom.py         # BToM model
 ```
 
 ### Key classes and interfaces
@@ -32,6 +36,7 @@ class DecisionModel:
     def update(self, observation: dict) -> None
     def complexity(self) -> float     # returns float in [0, 1]
     def reset(self) -> None           # resets to uniform prior
+    def teammate_replaced(self, agent_id: int) -> None   # optional; default no-op
 ```
 
 **Observation dict format** (passed to `update()`):
@@ -55,14 +60,15 @@ class Agent:
     def update(obs) -> None   # delegates to model.update()
     def complexity() -> float
     def reset() -> None
+    def teammate_replaced(agent_id) -> None   # delegates to model
 ```
 
 **`Condition` enum (conditions.py)**:
 ```python
-class Condition(Enum):
-    ANONYMOUS = "anonymous"
-    IDENTITY  = "identity"
-    TAG_BASED = "tag_based"
+class Condition(str, Enum):
+    ANONYMOUS = "Anonymous"
+    IDENTITY  = "Identity"
+    TAG_BASED = "Tag-based"
 ```
 
 **`_make_agents()` (game.py)** — current signature:
@@ -73,9 +79,12 @@ def _make_agents(
     n_players: int,
     rng: random.Random,
     discount: float = 1.0,
+    model_type: str = "fictitious_play",     # or "bayesian_tom"
+    decision_rule: str = "individual",       # Tag-based only: or "group"
+    include_own_action: bool = False,        # Tag-based only
 ) -> list[Agent]
 ```
-Needs to be extended to accept `model_type`.
+The same `rng` (seeded per run) is passed to every agent's model and used for its choices.
 
 **Tag assignment (game.py)**:
 - N=3: 1 red, 2 blue
@@ -83,13 +92,16 @@ Needs to be extended to accept `model_type`.
 - N=5: 2 red, 3 blue
 - Tags randomly shuffled each run
 
-**Existing EV helpers (fictitious_play.py)** — reuse these in BToM:
+**Shared EV helpers (`models/_ev.py`)**, used by both models:
 ```python
 def _poisson_binomial_pmf(probs: list[float]) -> list[float]
 def _ev_stag(teammate_probs: list[float], n_players: int) -> float
 def _ev_hare(teammate_probs: list[float], n_players: int) -> float
+def _pb_pmf_vec(prob_grids: list[np.ndarray]) -> np.ndarray          # vectorized PB
+def _ev_stag_vec(prob_grids, n_players) -> np.ndarray
+def _ev_hare_vec(prob_grids, n_players) -> np.ndarray
+def _ev_group(n_own, n_other, q, n_players) -> (ev_stag, ev_hare)   # group rule; q float or array
 ```
-Consider moving these to a shared `role_games/models/_ev.py` file so both models can import them.
 
 **Existing complexity helper (fictitious_play.py)**:
 ```python
@@ -100,10 +112,11 @@ def _normalized_entropy(p: float) -> float   # binary entropy / log(2)
 ```python
 def run_simulation(
     condition, n_rounds, k_convergence, tau, n_players,
-    replacement_rate, discount, sim_id, seed
+    replacement_rate, discount, model_type, decision_rule,
+    include_own_action, sim_id, seed
 ) -> list[dict]
 ```
-Needs `model_type` parameter added and passed through to `_make_agents()`.
+`run_multiple()` and `run_all_conditions()` take the same parameters (with `base_seed` in place of `sim_id`/`seed`).
 
 **Payoff function**:
 ```python
@@ -133,7 +146,8 @@ For each tracked entity, the belief vector θ represents that entity's beliefs a
 | Condition | θ represents | Dimensionality |
 |-----------|-------------|----------------|
 | Anonymous | Pool stag rate | 1D: θ ∈ [0,1] |
-| Tag-based | Per-tag stag rates | 2D: (θ^red, θ^blue) ∈ [0,1]² |
+| Tag-based (individual rule) | Per-tag stag rates | 2D: (θ^red, θ^blue) ∈ [0,1]² |
+| Tag-based (group rule) | The other tag's stag rate | 1D: θ^other ∈ [0,1] |
 | Identity  | Per-individual stag rates | (n−1)D: (θ¹,…,θⁿ⁻¹) ∈ [0,1]^{n-1} |
 
 ### What i maintains (one posterior per tracked entity)
@@ -141,10 +155,12 @@ For each tracked entity, the belief vector θ represents that entity's beliefs a
 **Anonymous**: one posterior over θ (1D), representing the shared pool belief.
 - All observations update the same posterior.
 
-**Tag-based**: two posteriors, each 2D — one for "what red agents believe" and one for "what blue agents believe."
+**Tag-based**: one posterior per tag that a teammate holds (usually two: "what red agents believe" and "what blue agents believe").
 - Observations from a red agent update the red posterior.
 - Observations from a blue agent update the blue posterior.
-- Each posterior lives in (θ^red, θ^blue) space because a tag-based agent tracks both tags.
+- Under the individual rule, each posterior lives in (θ^red, θ^blue) space because a tag-based agent tracks both tags.
+- Under the group rule, an agent's choice depends only on its belief about the other tag. So each posterior is 1D: what that tag believes about the other tag's stag rate.
+- An agent alone in its tag (red at N=3) keeps no posterior for its own tag. That posterior could only be updated from the agent's own choices, and it would never be used to predict a teammate.
 
 **Identity**: (n−1) posteriors, each (n−1)D — one per other agent j.
 - Observations from agent j update j's individual posterior.
@@ -154,7 +170,8 @@ For each tracked entity, the belief vector θ represents that entity's beliefs a
 ### Why identity is genuinely more complex
 
 - Anonymous: 1 posterior × 1 dimension = 1 total belief dimension
-- Tag-based: 2 posteriors × 2 dimensions = 4 total belief dimensions
+- Tag-based (individual rule): 2 posteriors × 2 dimensions = 4 total belief dimensions (an agent alone in its tag: 1 × 2 = 2)
+- Tag-based (group rule): up to 2 posteriors × 1 dimension = 2
 - Identity N=3: 2 posteriors × 2 dimensions = 4 total
 - Identity N=4: 3 posteriors × 3 dimensions = 9 total
 - Identity N=5: 4 posteriors × 4 dimensions = 16 total
@@ -170,7 +187,7 @@ Identity scales quadratically in n. This reflects a real cognitive cost: trackin
 Discretize each belief dimension into `n_grid` evenly-spaced points:
 ```python
 theta_vals = np.linspace(1/(2*n_grid), 1 - 1/(2*n_grid), n_grid)
-# e.g., n_grid=20: [0.025, 0.075, ..., 0.975]
+# default n_grid=10: [0.05, 0.15, ..., 0.95]
 # Avoids 0 and 1 for numerical stability in softmax
 ```
 
@@ -204,7 +221,13 @@ P(stag | θ, j) = p_stag
 P(hare | θ, j) = 1 - p_stag
 ```
 
-This is vectorized over all grid points simultaneously using numpy broadcasting.
+This is vectorized over all grid points simultaneously using numpy broadcasting. The P(stag | θ) grid for each posterior is computed once at construction (`_p_stag_grids`) and reused for every update and prediction.
+
+**Group rule (Tag-based):** j is modeled as a group reasoner too. With θ = j's belief that the other tag hunts stag:
+```python
+ev_s, ev_h = _ev_group(n_{t_j}, n_{other tag}, θ, n_players)   # linear in θ
+```
+At N=3 this EV gap does not depend on θ, so the likelihood is flat and the posteriors never move.
 
 ### Update rule
 
@@ -224,23 +247,22 @@ posterior /= posterior.sum()
 - Tag-based: update `_posteriors[j.tag]`
 - Identity: update `_posteriors[j.agent_id]`
 
-**Own action (tag-based only):** Same as FP — also update own tag's posterior using own action and own belief vector. This keeps the self-inclusive logic consistent with FP.
+**Own action (Tag-based only, optional):** With `include_own_action=True`, i's own action also updates the posterior for i's tag, as in FP. It only applies if a teammate shares that tag. It is off by default, so beliefs come only from others' choices, as in the other conditions.
 
 ### Discount factor
 
 Before each update (once per round, called via `_decay_posterior()`), dilute the posterior back toward the uniform prior:
 
 ```python
-def _decay_posterior(self) -> None:
+def _decay_posteriors(self) -> None:
     if self.discount == 1.0:
         return
-    n_points = self._posteriors[key].size
-    uniform = np.ones(self._posteriors[key].shape) / n_points
     for key in self._posteriors:
-        log_p = np.log(self._posteriors[key] + 1e-300)
-        log_u = np.log(uniform)
-        log_decayed = self.discount * log_p + (1 - self.discount) * log_u
-        p = np.exp(log_decayed - log_decayed.max())
+        posterior = self._posteriors[key]
+        log_p   = np.log(posterior + 1e-300)
+        log_u   = -math.log(posterior.size)          # log of the uniform mass
+        log_dec = self.discount * log_p + (1 - self.discount) * log_u
+        p = np.exp(log_dec - log_dec.max())
         self._posteriors[key] = p / p.sum()
 ```
 
@@ -264,28 +286,26 @@ Same as FP — softmax over EV:
 
 ```python
 def decide(self) -> str:
-    probs = self._expected_teammate_probs()  # list of E[P(stag)] for each teammate
-    ev_s = _ev_stag(probs, self.n_players)
-    ev_h = _ev_hare(probs, self.n_players)
+    if self.group_mode:                      # Tag-based, decision_rule="group"
+        other = self._other_tag(self.own_tag)
+        q = (self._posteriors[other] * self._p_stag_grids[other]).sum()
+        ev_s, ev_h = _ev_group(n_own, n_other, q, self.n_players)
+    else:
+        probs = self._expected_teammate_probs()  # predicted P(stag) for each teammate
+        ev_s = _ev_stag(probs, self.n_players)
+        ev_h = _ev_hare(probs, self.n_players)
     # log-sum-exp trick for numerical stability
     m = max(ev_s, ev_h) / self.tau
     z_s = exp(ev_s / self.tau - m)
     z_h = exp(ev_h / self.tau - m)
-    return "stag" if random.random() < z_s / (z_s + z_h) else "hare"
+    return "stag" if self._rng.random() < z_s / (z_s + z_h) else "hare"
 ```
 
-**`_expected_teammate_probs()`** returns a list of length n-1:
-- Anonymous: `[E[θ_pool]] * (n-1)` where E[θ_pool] = sum(theta_vals * posterior_pool)
-- Tag-based: `[E[θ^{tag_k}] for each teammate k]` — use the marginal expectation for each tag from the appropriate posterior
-- Identity: `[E[θ^{id_k}] for each teammate k]` — use the marginal expectation for each individual
-
-For tag-based and identity, the marginal expectation of dimension d from a multi-dimensional posterior is computed by summing/integrating out all other dimensions:
+**`_expected_teammate_probs()`** returns a list of length n-1, one predicted P(stag) per teammate, using the posterior for that teammate's key (`"pool"`, the teammate's tag, or the teammate's id):
 ```python
-# e.g., marginal for red from 2D posterior of shape (n_grid, n_grid):
-# where dim 0 = theta_red, dim 1 = theta_blue
-marginal_red = posterior.sum(axis=1)  # sum over theta_blue axis
-E_theta_red = (marginal_red * theta_vals).sum()
+(self._posteriors[key] * self._p_stag_grids[key]).sum()
 ```
+This is the posterior-weighted probability that the teammate hunts stag, i.e. the teammate's decision rule simulated forward. It is not the posterior mean of θ.
 
 ### Complexity measure
 
@@ -293,19 +313,24 @@ Entropy of each posterior, averaged across tracked entities, normalized to [0, 1
 
 ```python
 def complexity(self) -> float:
+    if self.group_mode:   # only the other tag's posterior drives the decision
+        posteriors = [self._posteriors[self._other_tag(self.own_tag)]]
+    else:
+        posteriors = list(self._posteriors.values())
     entropies = []
-    for key, posterior in self._posteriors.items():
+    for posterior in posteriors:
         p = posterior.flatten()
         p = p[p > 0]
         h = -np.sum(p * np.log(p))              # raw entropy (nats)
         h_max = np.log(posterior.size)           # max entropy = log(n_grid^d)
         entropies.append(h / h_max if h_max > 0 else 0.0)
-    return sum(entropies) / len(entropies)
+    return float(np.mean(entropies))
 ```
 
-This naturally captures the dimensionality difference:
+Because posteriors exist only for teammates' tags, this averages over beliefs the agent uses. It naturally captures the dimensionality difference:
 - Anonymous: normalizes by log(n_grid) — 1D max entropy
-- Tag-based: normalizes by log(n_grid²) = 2*log(n_grid) — 2D max entropy
+- Tag-based (individual rule): normalizes by log(n_grid²) = 2*log(n_grid) — 2D max entropy
+- Tag-based (group rule): normalizes by log(n_grid) — 1D max entropy
 - Identity N=5: normalizes by log(n_grid⁴) = 4*log(n_grid) — 4D max entropy
 
 The normalized complexity is still in [0, 1] and comparable across conditions.
@@ -315,141 +340,32 @@ The normalized complexity is still in [0, 1] and comparable across conditions.
 ```python
 def reset(self) -> None:
     for key in self._posteriors:
-        shape = self._posteriors[key].shape
-        self._posteriors[key] = np.ones(shape) / np.prod(shape)
+        d = len(self._posteriors[key].shape)
+        self._posteriors[key] = self._uniform(d)
 ```
+
+When a teammate j is replaced, every remaining agent's `teammate_replaced(j)` is called. In Identity, i resets its posterior about j to uniform. In Anonymous and Tag-based, posteriors are pooled across several players, so nothing changes. i's posteriors about other teammates k are not adjusted, even though they include k's beliefs about j. The likelihood is symmetric across a posterior's axes (k's choice depends only on the mix of its beliefs), so those posteriors stay symmetric and don't record which of k's beliefs is about j.
 
 ---
 
-## 4. Implementation Plan
+## 4. Implementation (completed)
 
-### Step 1 — Refactor shared EV helpers
+The original build plan (shared EV helpers → `BayesianToM` class → exports → `model_type` in `game.py` → UI selectors) has been carried out. Where each piece lives:
 
-Move `_poisson_binomial_pmf`, `_ev_stag`, `_ev_hare` from `fictitious_play.py` to a new file `role_games/models/_ev.py`. Update `fictitious_play.py` to import from there. `bayesian_tom.py` will also import from there.
+| Piece | Location |
+|-------|----------|
+| Shared EV helpers (scalar, vectorized, group rule) | `role_games/models/_ev.py` |
+| BToM model | `role_games/models/bayesian_tom.py` (`BayesianToM`) |
+| Model exports | `role_games/models/__init__.py` |
+| `model_type`, `decision_rule`, `include_own_action` passed down the call chain | `role_games/game.py`: `_make_agents` → `run_simulation` → `run_multiple` → `run_all_conditions` |
+| UI selectors | `Simulate.py` sidebar; `Play.py` → Agent parameters (Tag-based options shown only for Tag-based games) |
 
-### Step 2 — Create `role_games/models/bayesian_tom.py`
-
-```python
-import math
-import random
-import numpy as np
-from ..agents import DecisionModel
-from ..conditions import Condition
-from ._ev import _ev_stag, _ev_hare
-
-class BayesianToM(DecisionModel):
-    def __init__(
-        self,
-        condition: Condition,
-        own_tag: str | None,
-        tau: float,
-        n_players: int,
-        teammates_info: list[dict],   # same format as FP
-        discount: float = 1.0,
-        n_grid: int = 20,
-    ):
-        self.condition = condition
-        self.own_tag = own_tag
-        self.tau = tau
-        self.n_players = n_players
-        self.discount = discount
-        self.n_grid = n_grid
-
-        self._theta_vals = np.linspace(
-            1 / (2 * n_grid), 1 - 1 / (2 * n_grid), n_grid
-        )
-        self._teammate_ids  = [t["agent_id"] for t in teammates_info]
-        self._teammate_tags = [t["tag"] for t in teammates_info]
-
-        self._posteriors: dict[str, np.ndarray] = {}
-        self._init_posteriors(teammates_info)
-
-    def _init_posteriors(self, teammates_info):
-        # Anonymous: one 1D posterior for the pool
-        if self.condition == Condition.ANONYMOUS:
-            self._posteriors["pool"] = self._uniform(1)
-
-        # Tag-based: one 2D posterior per distinct tag (red + blue)
-        elif self.condition == Condition.TAG_BASED:
-            distinct_tags = sorted({t["tag"] for t in teammates_info})
-            for tag in distinct_tags:
-                self._posteriors[tag] = self._uniform(2)
-
-        # Identity: one (n-1)D posterior per individual teammate
-        else:  # IDENTITY
-            d = len(teammates_info)   # = n_players - 1
-            for t in teammates_info:
-                self._posteriors[str(t["agent_id"])] = self._uniform(d)
-
-    def _uniform(self, d: int) -> np.ndarray:
-        shape = (self.n_grid,) * d
-        n = self.n_grid ** d
-        return np.ones(shape) / n
-```
-
-The remaining methods (`decide`, `update`, `complexity`, `reset`, `_decay_posteriors`) follow the mathematical spec in section 3.
-
-**Key internal helpers to implement:**
-
-`_b_j(theta_grid, j_tag, j_teammate_tags_or_ids)` — given a grid of θ values, compute the teammate belief list for agent j. This is the core vectorized operation and requires careful numpy broadcasting. See section 3 for the per-condition logic.
-
-`_likelihood_grid(key, j_tag, j_teammate_info, action)` — compute P(action | θ) over the entire grid for entity `key`. Returns an array of the same shape as `_posteriors[key]`.
-
-`_expected_p_stag(key, teammate_tag_or_id)` — compute the marginal expected P(stag) for a given teammate from the posterior stored at `key`. Uses marginal summation for multi-dimensional posteriors.
-
-### Step 3 — Update `role_games/models/__init__.py`
-
-```python
-from .fictitious_play import FictitiousPlay
-from .bayesian_tom import BayesianToM
-
-__all__ = ["FictitiousPlay", "BayesianToM"]
-```
-
-### Step 4 — Update `role_games/game.py`
-
-Add `model_type: str = "fictitious_play"` parameter to `_make_agents()`, `run_simulation()`, `run_multiple()`, and `run_all_conditions()`. Pass it through the call chain.
-
-In `_make_agents()`:
-```python
-from .models import FictitiousPlay, BayesianToM
-
-def _make_agents(condition, tau, n_players, rng, discount=1.0, model_type="fictitious_play"):
-    ...
-    for i, (aid, tag) in enumerate(zip(agent_ids, tags)):
-        teammates_info = [...]
-        if model_type == "fictitious_play":
-            model = FictitiousPlay(condition, tag, tau, n_players, teammates_info, discount=discount)
-        else:
-            model = BayesianToM(condition, tag, tau, n_players, teammates_info, discount=discount)
-        agents.append(Agent(aid, tag, model))
-```
-
-### Step 5 — Update `Simulate.py`
-
-Add a model type selector to the sidebar (after the condition checkboxes or before parameters):
-```python
-model_type = st.selectbox(
-    "Agent model",
-    ["Fictitious Play", "Bayesian ToM"],
-    key="model_type",
-    help="FP tracks action frequencies. BToM models what other agents believe.",
-)
-model_type_key = "fictitious_play" if model_type == "Fictitious Play" else "bayesian_tom"
-```
-Pass `model_type=model_type_key` to `run_all_conditions()`.
-
-Add `"model_type": "fictitious_play"` to `PARAM_DEFAULTS`.
-
-### Step 6 — Update `Play.py`
-
-Add model type selector to `_sidebar()`:
-```python
-st.selectbox("Agent model", ["Fictitious Play", "Bayesian ToM"],
-             key="play_model_type")
-```
-
-In `_init_game()`, read `st.session_state.play_model_type` and pass the appropriate `model_type` string to `_make_agents()`.
+**How the build differs from the original plan**
+- Constructor signature: `BayesianToM(condition, own_agent_id, own_tag, tau, n_players, teammates_info, discount=1.0, n_grid=10, decision_rule="individual", rng=None, include_own_action=False)`.
+- `n_grid` defaults to 10, not 20, for speed. Robustness at 20 and 50 is still to be checked.
+- Instead of the planned `_b_j` / `_likelihood_grid` / `_expected_p_stag` helpers, P(stag | θ) grids are precomputed once per posterior (`_precompute_p_stag_grids`) and reused for both updating and prediction.
+- Prediction uses the posterior-weighted P(stag | θ), not the marginal mean of θ (see Section 3).
+- Posteriors exist only for teammates' tags. The own-action update is optional and off by default, and there is an optional group decision rule (Section 8).
 
 ---
 
@@ -515,12 +431,20 @@ grids = np.meshgrid(*[theta_vals]*(n-1), indexing="ij")
 # grids[k] has shape (n_grid,)^(n-1), represents j's belief about teammate k
 ```
 
-### Vectorized Poisson-Binomial PMF
-
-The existing `_poisson_binomial_pmf` takes a list of scalar probabilities. For the grid-based approach, you need a vectorized version that takes an array of probability-arrays and returns a PMF array over a batch dimension:
+### Tag-based, group rule (1D grid)
 
 ```python
-def _poisson_binomial_pmf_vectorized(prob_grids: list[np.ndarray]) -> np.ndarray:
+# theta_vals: shape (n_grid,) = this tag's belief that the other tag hunts stag
+ev_s, ev_h = _ev_group(n_this_tag, n_other_tag, theta_vals, n_players)
+# _ev_group is linear in θ, so it works directly on the array; no Poisson-Binomial needed
+```
+
+### Vectorized Poisson-Binomial PMF
+
+The scalar `_poisson_binomial_pmf` takes a list of scalar probabilities. The grid-based approach uses a vectorized version (`_pb_pmf_vec` in `_ev.py`) that takes an array of probability-arrays and returns a PMF array over a batch dimension:
+
+```python
+def _pb_pmf_vec(prob_grids: list[np.ndarray]) -> np.ndarray:
     """
     prob_grids: list of M arrays, each with the same shape S
     Returns: array of shape (*S, M+1) where result[..., k] = P(sum == k)
@@ -542,13 +466,14 @@ This is the most important performance-critical function. With numpy vectorizati
 
 ## 6. Parameter Notes
 
-- `n_grid = 20` is the recommended default. Larger grids are more accurate but slower.
-  - Anonymous: 20 points, negligible
-  - Tag-based: 400 points per posterior × 2 posteriors = 800 points total, fast
-  - Identity N=3: 400 per posterior × 2 = 800, fast
-  - Identity N=4: 8,000 per posterior × 3 = 24,000, fast
-  - Identity N=5: 160,000 per posterior × 4 = 640,000 — heavier but still feasible
-- `n_grid` could be exposed as a configurable parameter in the UI (under "Agent parameters") if performance is a concern.
+- `n_grid = 10` is the current default (chosen for speed; robustness at 20 and 50 is still to be checked). Larger grids are more accurate but slower. Sizes at the default:
+  - Anonymous: 10 points, negligible
+  - Tag-based (individual rule): 100 points per posterior × 2 posteriors = 200 points total, fast
+  - Tag-based (group rule): 10 points per posterior × 2 = 20, negligible
+  - Identity N=3: 100 per posterior × 2 = 200, fast
+  - Identity N=4: 1,000 per posterior × 3 = 3,000, fast
+  - Identity N=5: 10,000 per posterior × 4 = 40,000 — the heaviest case
+- `n_grid` is currently a constructor argument only. It is not passed through `run_simulation()` or exposed in the UI.
 - `tau` (softmax temperature) applies to both i's own decision AND the likelihood model of j's decision. Use the same tau for both — this is the simplest assumption and means agents model others as having the same decision noise as themselves.
 - `discount` behaves identically to FP: values < 1.0 decay the posterior toward uniform before each update.
 
@@ -570,14 +495,13 @@ This is the most important performance-critical function. With numpy vectorizati
 
 ---
 
-## 8. Summary of What Changes
+## 8. Change Log
 
-| File | Change |
+| Date | Change |
 |------|--------|
-| `role_games/models/_ev.py` | **New** — shared EV helpers extracted from FP |
-| `role_games/models/bayesian_tom.py` | **New** — BToM model class |
-| `role_games/models/__init__.py` | Export `BayesianToM` |
-| `role_games/models/fictitious_play.py` | Import EV helpers from `_ev.py` |
-| `role_games/game.py` | Add `model_type` param throughout call chain |
-| `Simulate.py` | Add model type selector to sidebar + PARAM_DEFAULTS |
-| `Play.py` | Add model type selector to sidebar |
+| June 2026 | Initial build: `_ev.py` extracted from FP; `BayesianToM` added; `model_type` passed through `game.py`; model selectors in Simulate and Play. |
+| October 2026 | **Group decision rule** (`decision_rule="group"`, Tag-based only): agents, and the agents they model, choose for their tag as a block. Tag posteriors become 1D, and complexity counts only the other tag's posterior. |
+| October 2026 | **Own-action update made optional** (`include_own_action`, default `False`). Previously it was always on in Tag-based. The default now matches the other conditions: beliefs come only from others' choices. |
+| October 2026 | **No posterior for a tag the agent is alone in.** This changed Tag-based complexity for red agents at N=3 under the individual rule; choices were unaffected. |
+| October 2026 | **Replacement in Identity:** remaining agents now reset their posterior about the replaced agent (`teammate_replaced`). Before, they kept treating the newcomer as the person who left. This changes Identity results whenever `replacement_rate > 0`. |
+| October 2026 | **Reproducible seeds:** choices now use the per-run seeded generator instead of Python's global `random`, so `base_seed` reproduces runs exactly. Seeded results from before this change will not match current output. |

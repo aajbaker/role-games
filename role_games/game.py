@@ -36,6 +36,8 @@ def _make_agents(
     rng: random.Random,
     discount: float = 1.0,
     model_type: str = "fictitious_play",
+    decision_rule: str = "individual",
+    include_own_action: bool = False,
 ) -> list[Agent]:
     agent_ids = list(range(n_players))
 
@@ -52,10 +54,14 @@ def _make_agents(
         ]
         if model_type == "bayesian_tom":
             model = BayesianToM(condition, aid, tag, tau, n_players,
-                                teammates_info, discount=discount)
+                                teammates_info, discount=discount,
+                                decision_rule=decision_rule, rng=rng,
+                                include_own_action=include_own_action)
         else:
             model = FictitiousPlay(condition, tag, tau, n_players,
-                                   teammates_info, discount=discount)
+                                   teammates_info, discount=discount,
+                                   decision_rule=decision_rule, rng=rng,
+                                   include_own_action=include_own_action)
         agents.append(Agent(aid, tag, model))
 
     return agents
@@ -84,6 +90,8 @@ def run_simulation(
     replacement_rate: float = 0.0,
     discount: float = 1.0,
     model_type: str = "fictitious_play",
+    decision_rule: str = "individual",
+    include_own_action: bool = False,
     sim_id: int = 0,
     seed: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -95,10 +103,22 @@ def run_simulation(
     replaced    — True for an agent in the first round after their beliefs were reset.
     discount    — exponential decay factor applied to belief counts each round
                   before the new observation is added (1.0 = standard fictitious play).
+    decision_rule — "individual" or "group"; only affects Tag-based. Logged as the
+                  rule actually used, so non-tag conditions always log "individual".
+    include_own_action — Tag-based only: whether an agent's own action counts toward
+                  its own tag's belief. Logged as what actually happened, so non-tag
+                  conditions always log False.
+    seed        — seeds one RNG shared by tag assignment, every agent's choices, and
+                  replacement, so the same seed reproduces the run exactly.
     """
     rng = random.Random(seed)
     agents = _make_agents(condition, tau, n_players, rng,
-                          discount=discount, model_type=model_type)
+                          discount=discount, model_type=model_type,
+                          decision_rule=decision_rule,
+                          include_own_action=include_own_action)
+    is_tag = condition == Condition.TAG_BASED
+    effective_rule = decision_rule if is_tag else "individual"
+    effective_own = include_own_action and is_tag
 
     records: list[dict[str, Any]] = []
     recent_stag_counts: deque[int] = deque(maxlen=k_convergence)
@@ -141,6 +161,8 @@ def run_simulation(
                     "complexity": comp,
                     "replaced": agent.agent_id in replaced_this_round,
                     "model_type": model_type,
+                    "decision_rule": effective_rule,
+                    "include_own_action": effective_own,
                     "converged":  converged,
                 }
             )
@@ -162,11 +184,15 @@ def run_simulation(
             }
             agent.update(observation)
 
-        # Replacement for next round (invisible to other agents)
+        # Replacement for next round. The newcomer starts from the prior; the others
+        # learn who was replaced, which only changes beliefs in Identity.
         replaced_this_round = set()
         if replacement_rate > 0.0 and rng.random() < replacement_rate:
             chosen = rng.choice(agents)
             chosen.reset()
+            for other in agents:
+                if other is not chosen:
+                    other.teammate_replaced(chosen.agent_id)
             replaced_this_round.add(chosen.agent_id)
 
     return records
@@ -186,6 +212,8 @@ def run_multiple(
     replacement_rate: float = 0.0,
     discount: float = 1.0,
     model_type: str = "fictitious_play",
+    decision_rule: str = "individual",
+    include_own_action: bool = False,
     base_seed: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
@@ -206,6 +234,8 @@ def run_multiple(
             replacement_rate=replacement_rate,
             discount=discount,
             model_type=model_type,
+            decision_rule=decision_rule,
+            include_own_action=include_own_action,
             sim_id=sim_id,
             seed=seed,
         )
@@ -221,6 +251,8 @@ def run_multiple(
                 "condition": condition.value,
                 "n_players": n_players,
                 "replacement_rate": replacement_rate,
+                "decision_rule": records[0]["decision_rule"],
+                "include_own_action": records[0]["include_own_action"],
                 "total_payoff": total_payoff,
                 "mean_complexity": mean_complexity,
             }
@@ -238,6 +270,8 @@ def run_all_conditions(
     replacement_rate: float = 0.0,
     discount: float = 1.0,
     model_type: str = "fictitious_play",
+    decision_rule: str = "individual",
+    include_own_action: bool = False,
     base_seed: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run all three conditions and return combined records."""
@@ -255,6 +289,8 @@ def run_all_conditions(
             replacement_rate=replacement_rate,
             discount=discount,
             model_type=model_type,
+            decision_rule=decision_rule,
+            include_own_action=include_own_action,
             base_seed=base_seed,
         )
         all_round_records.extend(rr)

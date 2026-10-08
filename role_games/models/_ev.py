@@ -84,3 +84,26 @@ def _ev_hare_vec(prob_grids: list[np.ndarray], n_players: int) -> np.ndarray:
         group_total = (4.0 if stag_count >= 2 else 0.0) + hare_count
         ev += pmf[..., k] * (group_total / n_players)
     return ev
+
+
+# ── Group decision (tag-based only) ──────────────────────────────────────────
+
+def _payoff_per_player(stag_count: int, n_players: int) -> float:
+    hare_count = n_players - stag_count
+    return ((4.0 if stag_count >= 2 else 0.0) + hare_count) / n_players
+
+
+def _ev_group(n_own: int, n_other: int, q, n_players: int):
+    """
+    EV of my group hunting stag vs hare, assuming each group acts as a block.
+
+    n_own   : size of my tag group, including me
+    n_other : size of the other tag group
+    q       : P(other group hunts stag); float or ndarray (EV is linear in q)
+    Returns (ev_stag, ev_hare) with the same type/shape as q.
+    """
+    ev_stag = (q * _payoff_per_player(n_own + n_other, n_players)
+               + (1 - q) * _payoff_per_player(n_own, n_players))
+    ev_hare = (q * _payoff_per_player(n_other, n_players)
+               + (1 - q) * _payoff_per_player(0, n_players))
+    return ev_stag, ev_hare

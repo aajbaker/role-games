@@ -18,6 +18,9 @@ class DecisionModel(ABC):
     def reset(self) -> None:
         """Reset beliefs to initial uniform prior (called on replacement)."""
 
+    def teammate_replaced(self, agent_id: int) -> None:
+        """Called on each remaining agent when a teammate is replaced. Default: no-op."""
+
 
 class Agent:
     def __init__(self, agent_id: int, tag: str | None, model: DecisionModel):
@@ -36,3 +39,6 @@ class Agent:
 
     def reset(self) -> None:
         self.model.reset()
+
+    def teammate_replaced(self, agent_id: int) -> None:
+        self.model.teammate_replaced(agent_id)
